@@ -1,0 +1,84 @@
+{
+  "projectType": "saas",
+  "projectName": "Login Machine",
+  "projectDescription": "AI-powered login automation that handles any website's authentication flow using Claude and Playwright.",
+  "theme": "aspen",
+  "primaryColor": "#4b5258",
+  "lightColor": "#b1b4b7",
+  "darkColor": "#ffffff",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "environment-setup"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/how-it-works",
+              "concepts/screen-types",
+              "concepts/design-principles",
+              "concepts/credential-isolation"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/using-the-demo",
+              "guides/integrating-login-machine",
+              "guides/customizing-prompts",
+              "guides/troubleshooting"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Endpoints",
+            "pages": [
+              "api/overview",
+              "api/chat-endpoint"
+            ]
+          },
+          {
+            "group": "Core Modules",
+            "pages": [
+              "api/agent",
+              "api/browser",
+              "api/types"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "AI-powered login page classification using Claude Sonnet 4.5",
+    "Universal login flow handling (credentials, SSO, MFA, magic links)",
+    "Credential isolation - values never pass through LLM",
+    "Self-correcting Playwright locators with DOM validation",
+    "Cloud browser automation via BrowserBase",
+    "Real-time streaming UI with Server-Sent Events"
+  ],
+  "publicApiSurface": [
+    "POST /api/chat (actions: start, submit, close)",
+    "analyzeLoginPage(session): Promise<{screen, screenshot}>",
+    "handleScreen(session, screen, userInput): Promise<{nextScreen, message}>",
+    "createSession(): Promise<BrowserSession>",
+    "getSession(sessionId): Promise<BrowserSession>",
+    "closeSession(sessionId): Promise<void>",
+    "getPageContext(page): Promise<{html, screenshot, url}>",
+    "fillAndSubmit(page, inputs, submitLocator): Promise<void>",
+    "LoginStateSchema (Zod schema)",
+    "ScreenType enum (credential_login_form, choice_screen, magic_login_link, loading_screen, blocked_screen, logged_in_screen)"
+  ]
+}
