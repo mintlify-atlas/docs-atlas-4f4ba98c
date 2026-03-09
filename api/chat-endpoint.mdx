@@ -1,0 +1,721 @@
+---
+title: POST /api/chat
+description: The single endpoint that drives the entire login flow
+---
+
+## Endpoint
+
+```
+POST /api/chat
+```
+
+This endpoint handles all interactions with the login flow state machine. The behavior is determined by the `action` field in the request body.
+
+## Actions
+
+<Tabs>
+  <Tab title="start">
+    ## Start Action
+
+    Creates a new BrowserBase session and navigates to the target URL.
+
+    ### Request Body
+
+    <ParamField path="action" type="string" required>
+      Must be `"start"`
+    </ParamField>
+
+    <ParamField path="url" type="string" required>
+      The login page URL to navigate to. Can be a full URL or a domain.
+    </ParamField>
+
+    **Zod Schema** (`/src/app/api/chat/route.ts:28-31`):
+
+    ```typescript
+    const StartBody = z.object({
+      action: z.literal("start"),
+      url: z.string().url().or(z.string().min(1)),
+    });
+    ```
+
+    ### Response
+
+    Returns JSON immediately with session information:
+
+    <ResponseField name="sessionId" type="string">
+      The BrowserBase session identifier. Use this in subsequent `submit` and `close` actions.
+    </ResponseField>
+
+    <ResponseField name="liveViewUrl" type="string">
+      URL to view the live browser session in BrowserBase dashboard.
+    </ResponseField>
+
+    <ResponseField name="screen" type="object">
+      Initial screen state, typically `{"type": "loading_screen"}` while navigation is in progress.
+    </ResponseField>
+
+    <ResponseField name="screenshot" type="string | null">
+      Base64-encoded screenshot (null initially).
+    </ResponseField>
+
+    ### Example
+
+    <CodeGroup>
+    ```bash cURL
+    curl -X POST http://localhost:3000/api/chat \
+      -H "Content-Type: application/json" \
+      -d '{
+        "action": "start",
+        "url": "https://example.com/login"
+      }'
+    ```
+
+    ```javascript JavaScript
+    const response = await fetch('http://localhost:3000/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'start',
+        url: 'https://example.com/login'
+      })
+    });
+
+    const data = await response.json();
+    console.log('Session ID:', data.sessionId);
+    console.log('Live View:', data.liveViewUrl);
+    ```
+
+    ```typescript TypeScript
+    interface StartResponse {
+      sessionId: string;
+      liveViewUrl: string;
+      screen: { type: string };
+      screenshot: string | null;
+    }
+
+    const response = await fetch('http://localhost:3000/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'start',
+        url: 'https://example.com/login'
+      })
+    });
+
+    const data: StartResponse = await response.json();
+    ```
+    </CodeGroup>
+
+    **Response example:**
+
+    ```json
+    {
+      "sessionId": "bb_session_a1b2c3d4",
+      "liveViewUrl": "https://browserbase.com/sessions/a1b2c3d4/view",
+      "screen": {
+        "type": "loading_screen"
+      },
+      "screenshot": null
+    }
+    ```
+
+    <Note>
+      The browser navigation starts in the background. You'll need to call `submit` with the `loading_screen` to analyze the actual page content.
+    </Note>
+  </Tab>
+
+  <Tab title="submit">
+    ## Submit Action
+
+    Acts on the current screen state. Behavior depends on whether user input is provided.
+
+    ### Request Body
+
+    <ParamField path="action" type="string" required>
+      Must be `"submit"`
+    </ParamField>
+
+    <ParamField path="sessionId" type="string" required>
+      The session ID from the `start` action.
+    </ParamField>
+
+    <ParamField path="screen" type="LoginState" required>
+      The current screen state object returned from previous actions. See [Screen Types](/concepts/screen-types) for the full schema.
+    </ParamField>
+
+    <ParamField path="values" type="object" default="{}">
+      User-provided values for form fields or choices. Keys match field names from `screen.inputs` or choice identifiers.
+    </ParamField>
+
+    **Zod Schema** (`/src/app/api/chat/route.ts:33-38`):
+
+    ```typescript
+    const SubmitBody = z.object({
+      action: z.literal("submit"),
+      sessionId: z.string().min(1),
+      screen: LoginStateSchema,
+      values: z.record(z.string(), z.string()).default({}),
+    });
+    ```
+
+    ### Response Types
+
+    The `submit` action returns **different response types** depending on the scenario:
+
+    #### User-Initiated Actions (SSE Stream)
+
+    When `values` contains user input and the screen type is:
+    - `credential_login_form`
+    - `choice_screen`
+    - `magic_login_link`
+
+    The endpoint returns a **Server-Sent Events (SSE) stream** with two events:
+
+    <ResponseField name="action_complete" type="event">
+      Emitted first to indicate the browser action completed.
+
+      **Data:**
+      ```json
+      {
+        "action": "Filled login form and clicked submit"
+      }
+      ```
+    </ResponseField>
+
+    <ResponseField name="screen" type="event">
+      Emitted after analyzing the new page state.
+
+      **Data:**
+      ```json
+      {
+        "screen": { /* LoginState object */ },
+        "screenshot": "data:image/png;base64,..."
+      }
+      ```
+    </ResponseField>
+
+    #### Auto-Retry Scenarios (JSON)
+
+    When the screen type is `loading_screen` or `blocked_screen`, or when no user input is provided, the endpoint returns **plain JSON**:
+
+    <ResponseField name="screen" type="LoginState">
+      The analyzed screen state after processing.
+    </ResponseField>
+
+    <ResponseField name="screenshot" type="string">
+      Base64-encoded screenshot of the current page.
+    </ResponseField>
+
+    <ResponseField name="message" type="AgentMessage">
+      Message describing what happened. See `/src/lib/ai-login/types.ts:100-105` for the schema.
+    </ResponseField>
+
+    ### Example: Form Submission (SSE)
+
+    <CodeGroup>
+    ```bash cURL
+    curl -X POST http://localhost:3000/api/chat \
+      -H "Content-Type: application/json" \
+      -d '{
+        "action": "submit",
+        "sessionId": "bb_session_a1b2c3d4",
+        "screen": {
+          "type": "credential_login_form",
+          "inputs": [
+            {
+              "type": "email",
+              "name": "username",
+              "label": "Email",
+              "playwrightLocator": "input[name=\"email\"]"
+            },
+            {
+              "type": "password",
+              "name": "password",
+              "label": "Password",
+              "playwrightLocator": "input[name=\"password\"]"
+            }
+          ],
+          "submit": {
+            "type": "submit",
+            "name": "submit",
+            "label": "Sign In",
+            "playwrightLocator": "button[type=\"submit\"]"
+          }
+        },
+        "values": {
+          "username": "user@example.com",
+          "password": "secretpass123"
+        }
+      }'
+    ```
+
+    ```javascript JavaScript (SSE)
+    const response = await fetch('http://localhost:3000/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'submit',
+        sessionId: 'bb_session_a1b2c3d4',
+        screen: {
+          type: 'credential_login_form',
+          inputs: [
+            {
+              type: 'email',
+              name: 'username',
+              label: 'Email',
+              playwrightLocator: 'input[name="email"]'
+            },
+            {
+              type: 'password',
+              name: 'password',
+              label: 'Password',
+              playwrightLocator: 'input[name="password"]'
+            }
+          ],
+          submit: {
+            type: 'submit',
+            name: 'submit',
+            label: 'Sign In',
+            playwrightLocator: 'button[type="submit"]'
+          }
+        },
+        values: {
+          username: 'user@example.com',
+          password: 'secretpass123'
+        }
+      })
+    });
+
+    // Parse SSE stream
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const chunk = decoder.decode(value);
+      const lines = chunk.split('\n');
+
+      for (const line of lines) {
+        if (line.startsWith('event: ')) {
+          const event = line.slice(7);
+          console.log('Event:', event);
+        } else if (line.startsWith('data: ')) {
+          const data = JSON.parse(line.slice(6));
+          console.log('Data:', data);
+        }
+      }
+    }
+    ```
+    </CodeGroup>
+
+    **SSE Stream Output:**
+
+    ```
+    event: action_complete
+    data: {"action":"Filled login form and clicked submit"}
+
+    event: screen
+    data: {"screen":{"type":"loading_screen"},"screenshot":"data:image/png;base64,..."}
+    ```
+
+    ### Example: Auto-Retry (JSON)
+
+    <CodeGroup>
+    ```javascript JavaScript
+    const response = await fetch('http://localhost:3000/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'submit',
+        sessionId: 'bb_session_a1b2c3d4',
+        screen: {
+          type: 'loading_screen'
+        },
+        values: {}
+      })
+    });
+
+    const data = await response.json();
+    console.log('Next screen:', data.screen);
+    ```
+    </CodeGroup>
+
+    **JSON Response:**
+
+    ```json
+    {
+      "screen": {
+        "type": "credential_login_form",
+        "inputs": [
+          {
+            "type": "email",
+            "name": "username",
+            "label": "Email Address",
+            "playwrightLocator": "input[name=\"email\"]",
+            "errorMessage": null
+          },
+          {
+            "type": "password",
+            "name": "password",
+            "label": "Password",
+            "playwrightLocator": "input[type=\"password\"]",
+            "errorMessage": null
+          }
+        ],
+        "submit": {
+          "type": "submit",
+          "name": "submit",
+          "label": "Sign In",
+          "playwrightLocator": "button[type=\"submit\"]"
+        }
+      },
+      "screenshot": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA...",
+      "message": {
+        "type": "input_request",
+        "screen": { /* same as above */ }
+      }
+    }
+    ```
+
+    <Warning>
+      The `screen` object you send must match the structure returned from previous API calls. Do not modify or omit fields, as the backend uses this to understand the current page state.
+    </Warning>
+  </Tab>
+
+  <Tab title="close">
+    ## Close Action
+
+    Tears down the BrowserBase session and releases resources.
+
+    ### Request Body
+
+    <ParamField path="action" type="string" required>
+      Must be `"close"`
+    </ParamField>
+
+    <ParamField path="sessionId" type="string" required>
+      The session ID to close.
+    </ParamField>
+
+    **Zod Schema** (`/src/app/api/chat/route.ts:40-43`):
+
+    ```typescript
+    const CloseBody = z.object({
+      action: z.literal("close"),
+      sessionId: z.string().min(1),
+    });
+    ```
+
+    ### Response
+
+    <ResponseField name="success" type="boolean">
+      Always `true` if the session was closed successfully.
+    </ResponseField>
+
+    ### Example
+
+    <CodeGroup>
+    ```bash cURL
+    curl -X POST http://localhost:3000/api/chat \
+      -H "Content-Type: application/json" \
+      -d '{
+        "action": "close",
+        "sessionId": "bb_session_a1b2c3d4"
+      }'
+    ```
+
+    ```javascript JavaScript
+    const response = await fetch('http://localhost:3000/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'close',
+        sessionId: 'bb_session_a1b2c3d4'
+      })
+    });
+
+    const data = await response.json();
+    console.log('Session closed:', data.success);
+    ```
+
+    ```typescript TypeScript
+    interface CloseResponse {
+      success: boolean;
+    }
+
+    const response = await fetch('http://localhost:3000/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'close',
+        sessionId: 'bb_session_a1b2c3d4'
+      })
+    });
+
+    const data: CloseResponse = await response.json();
+    ```
+    </CodeGroup>
+
+    **Response:**
+
+    ```json
+    {
+      "success": true
+    }
+    ```
+
+    <Note>
+      Always call `close` when you're done with a session to avoid leaving browser instances running. BrowserBase sessions may have time-based or usage-based limits.
+    </Note>
+  </Tab>
+</Tabs>
+
+## Complete Flow Example
+
+Here's a complete TypeScript example showing all three actions:
+
+```typescript
+interface ChatRequest {
+  action: string;
+  [key: string]: unknown;
+}
+
+const API_URL = 'http://localhost:3000/api/chat';
+
+// 1. Start session
+const startResponse = await fetch(API_URL, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    action: 'start',
+    url: 'https://example.com/login'
+  })
+});
+
+const { sessionId, liveViewUrl, screen } = await startResponse.json();
+console.log('Session started:', sessionId);
+console.log('Watch live at:', liveViewUrl);
+
+// 2. Wait for page to load
+let currentScreen = screen;
+while (currentScreen.type === 'loading_screen') {
+  const response = await fetch(API_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      action: 'submit',
+      sessionId,
+      screen: currentScreen,
+      values: {}
+    })
+  });
+  const data = await response.json();
+  currentScreen = data.screen;
+}
+
+// 3. Fill login form
+if (currentScreen.type === 'credential_login_form') {
+  const response = await fetch(API_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      action: 'submit',
+      sessionId,
+      screen: currentScreen,
+      values: {
+        username: 'user@example.com',
+        password: 'secretpass123'
+      }
+    })
+  });
+
+  // Parse SSE stream
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    const chunk = decoder.decode(value);
+    const lines = chunk.split('\n');
+
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        const data = JSON.parse(line.slice(6));
+        if (line.includes('event: screen')) {
+          currentScreen = data.screen;
+        }
+      }
+    }
+  }
+}
+
+// 4. Check if logged in
+if (currentScreen.type === 'logged_in_screen') {
+  console.log('Login successful!');
+}
+
+// 5. Close session
+await fetch(API_URL, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    action: 'close',
+    sessionId
+  })
+});
+
+console.log('Session closed');
+```
+
+## Error Handling
+
+All actions can return error responses:
+
+```json
+{
+  "error": "Session not found"
+}
+```
+
+**Common errors:**
+
+- `400` - Invalid request body, missing fields, unknown action
+- `500` - Session not found, browser error, network timeout
+
+For SSE streams, errors are sent as events:
+
+```
+event: error
+data: {"message":"Session not found"}
+```
+
+## Implementation Reference
+
+The endpoint implementation is in `/src/app/api/chat/route.ts:98-204`:
+
+<Expandable title="View POST handler source">
+```typescript
+export async function POST(request: NextRequest) {
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return err("Invalid JSON", 400);
+  }
+
+  const { action } = body as { action?: string };
+  // Build CORS headers for raw Response objects (SSE).
+  const origin = request.headers.get("origin") ?? "";
+  const corsHeaders: Record<string, string> = origin
+    ? { "Access-Control-Allow-Origin": origin }
+    : {};
+
+  try {
+    // ----------------------------------------------------------------
+    // ACTION: start — launch browser and return live view immediately
+    // ----------------------------------------------------------------
+    if (action === "start") {
+      const parsed = StartBody.safeParse(body);
+      if (!parsed.success) return err(parsed.error.issues[0].message, 400);
+
+      const session = await createSession();
+
+      // Kick off navigation in the background
+      session.page
+        .goto(parsed.data.url, {
+          waitUntil: "domcontentloaded",
+          timeout: 30000,
+        })
+        .catch(() => {});
+
+      return ok({
+        sessionId: session.sessionId,
+        liveViewUrl: session.liveViewUrl,
+        screen: { type: "loading_screen" },
+        screenshot: null,
+      });
+    }
+
+    // ----------------------------------------------------------------
+    // ACTION: submit — act on the current screen
+    // ----------------------------------------------------------------
+    if (action === "submit") {
+      const parsed = SubmitBody.safeParse(body);
+      if (!parsed.success) return err(parsed.error.issues[0].message, 400);
+
+      const { sessionId, screen, values } = parsed.data;
+      const session = await getSession(sessionId);
+
+      // Determine if this is a user-initiated action (has actual values)
+      const hasUserInput = Object.values(values).some((v) => v);
+      const isUserAction =
+        hasUserInput &&
+        ["credential_login_form", "choice_screen", "magic_login_link"].includes(
+          screen.type,
+        );
+
+      if (isUserAction) {
+        // SSE: stream action_complete, then analyze and stream screen
+        return sseResponse(async (send) => {
+          const { message } = await handleScreen(session, screen, values);
+
+          // 1. Signal that the action is done (form fill complete)
+          send("action_complete", {
+            action: message.type === "action" ? message.action : "Done",
+          });
+
+          // 2. Wait for page content to settle, then analyze
+          await waitForPageContent(session.page);
+          const { screen: analyzed, screenshot } =
+            await analyzeLoginPage(session);
+
+          send("screen", { screen: analyzed, screenshot });
+        }, corsHeaders);
+      }
+
+      // JSON: auto-retry (loading_screen, blocked_screen) or input_request
+      const { nextScreen, message } = await handleScreen(
+        session,
+        screen,
+        values,
+      );
+      const { screenshot } = await getPageContext(session.page);
+      return ok({ screen: nextScreen, screenshot, message });
+    }
+
+    // ----------------------------------------------------------------
+    // ACTION: close — tear down browser session
+    // ----------------------------------------------------------------
+    if (action === "close") {
+      const parsed = CloseBody.safeParse(body);
+      if (!parsed.success) return err(parsed.error.issues[0].message, 400);
+
+      await closeSession(parsed.data.sessionId);
+      return ok({ success: true });
+    }
+
+    return err("Unknown action", 400);
+  } catch (error) {
+    console.error("[/api/chat]", error);
+    return err(
+      error instanceof Error ? error.message : "Internal server error",
+    );
+  }
+}
+```
+</Expandable>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Screen Types" icon="desktop" href="/concepts/screen-types">
+    Understand the different screen types and their schemas
+  </Card>
+  <Card title="AI Agent" icon="robot" href="/api/agent">
+    Learn how the AI analyzes pages and makes decisions
+  </Card>
+</CardGroup>

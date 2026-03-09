@@ -1,0 +1,408 @@
+---
+title: Customizing Prompts
+description: Modify the system prompt to adapt Login Machine for custom use cases
+---
+
+## Overview
+
+The Login Machine's behavior is driven by a single system prompt that instructs Claude on how to classify login pages. By customizing this prompt, you can:
+
+- Add new screen types for non-standard flows
+- Change locator generation priorities
+- Tune classification sensitivity
+- Handle domain-specific login patterns
+
+<Info>
+  The system prompt is located in `src/lib/ai-login/prompts.ts` and exported as `LOGIN_SCREEN_SYSTEM_PROMPT`.
+</Info>
+
+## The Default Prompt
+
+Here's the complete prompt used in the default implementation:
+
+```typescript
+// From prompts.ts:1-51
+export const LOGIN_SCREEN_SYSTEM_PROMPT = `You are an AI agent that analyzes login pages and helps users authenticate.
+
+Your task is to analyze the provided HTML and screenshot to determine what type of login screen this is.
+
+## Screen Types
+
+### credential_login_form
+Use when you see input fields for credentials (email, password, text, tel, OTP, select) with a submit button.
+- Extract all visible input fields with their types and labels
+- Identify the primary submit button
+- Generate valid Playwright locators for each element
+- **Error detection**: If the page shows an error message (e.g. "Your email or password is incorrect", "Invalid credentials", "Account not found"), set the errorMessage field on the most relevant input(s) with the exact error text. For page-level errors not tied to a specific field, put the message on the first input.
+
+### choice_screen
+Use when you see multiple buttons/links representing choices (account selector, company picker, MFA method selection).
+- No credential input fields present
+- Extract each option with its text and locator
+- Most choice screens do NOT have a separate submit button — the options themselves are clickable. Only include the submit field if the page truly requires selecting an option (radio button, select box) AND then clicking a separate "Continue"/"Submit" button to confirm. Do not add submit unless it is clearly required.
+
+### magic_login_link
+Use when the page instructs user to check their email for a verification/magic link.
+- No active input fields
+- Common patterns: "Check your inbox", "We sent you an email"
+
+### blocked_screen
+Use when a popup/dialog blocks the login flow and must be dismissed.
+- Extract the dismiss button locator
+
+### loading_screen
+Use when the page is still loading (spinner, blank, empty body).
+
+### logged_in_screen
+Use when the user is successfully logged in (dashboard visible, profile dropdown, welcome message).
+- NO login forms visible
+- User has completed authentication
+
+## Locator Generation Rules
+
+Priority for robust Playwright locators:
+1. Unique ID: #uniqueId
+2. Unique name with type: input[name="username"][type="email"]
+3. Button/link text: button:has-text("Sign In")
+4. Data attributes: [data-testid="login-button"]
+
+## Exclusions
+
+Exclude: hidden/disabled fields, cookie banners, social login buttons (Google/Apple/Microsoft), help/privacy/forgot-password links, sign-up links.
+
+## OTP Detection
+
+OTP inputs often have: maxlength=4-6, inputmode="numeric", pattern="[0-9]*", placeholder with "code"/"verification", autocomplete="one-time-code", or multiple single-digit inputs in sequence.`;
+```
+
+## Prompt Structure
+
+The prompt is organized into five sections:
+
+<Steps>
+  <Step title="Role & Task">
+    Establishes the agent's purpose: analyze login pages and return structured classifications.
+  </Step>
+  
+  <Step title="Screen Types">
+    Defines the six screen types and when to use each. This is the most important section—modifying it changes how the agent perceives pages.
+  </Step>
+  
+  <Step title="Locator Generation Rules">
+    Instructs the LLM on how to create robust Playwright selectors. Ordered by priority.
+  </Step>
+  
+  <Step title="Exclusions">
+    Lists elements to ignore (cookie banners, social login, sign-up links).
+  </Step>
+  
+  <Step title="Special Cases">
+    Patterns for detecting specific field types like OTP inputs.
+  </Step>
+</Steps>
+
+## Customization Strategies
+
+### Adding a New Screen Type
+
+If your login flows include a screen type not covered by the default six, you can extend the prompt and schema.
+
+**Example: Security Question Screen**
+
+<Steps>
+  <Step title="Update the Zod schema">
+    Add the new screen type to `types.ts`:
+    
+    ```typescript
+    export const ScreenType = z.enum([
+      "credential_login_form",
+      "choice_screen",
+      "magic_login_link",
+      "logged_in_screen",
+      "loading_screen",
+      "blocked_screen",
+      "security_question", // New type
+    ]);
+    
+    export const LoginStateSchema = z.object({
+      type: ScreenType,
+      // ... existing fields
+      securityQuestion: z.string().optional().describe("The security question text"),
+      answerLocator: z.string().optional().describe("Locator for the answer input"),
+    });
+    ```
+  </Step>
+  
+  <Step title="Add to the prompt">
+    Modify `prompts.ts` to include the new screen type:
+    
+    ```typescript
+    export const LOGIN_SCREEN_SYSTEM_PROMPT = `...
+    
+    ### security_question
+    Use when the page asks a security question ("What is your mother's maiden name?", "What city were you born in?").
+    - Extract the question text
+    - Identify the answer input field
+    - Identify the submit button
+    
+    ...`;
+    ```
+  </Step>
+  
+  <Step title="Handle in agent.ts">
+    Add a case to `handleScreen()` to process the new screen type:
+    
+    ```typescript
+    case "security_question": {
+      if (!userInput?.answer) {
+        return {
+          nextScreen: null,
+          message: { type: "input_request", screen },
+        };
+      }
+      
+      await fillAndSubmit(
+        session.page,
+        [{ locator: screen.answerLocator!, value: userInput.answer }],
+        screen.submit!.playwrightLocator,
+      );
+      
+      return {
+        nextScreen: null,
+        message: { type: "action", action: "Answered security question" },
+      };
+    }
+    ```
+  </Step>
+</Steps>
+
+### Changing Locator Priorities
+
+The default prompt prioritizes locators in this order:
+
+1. Unique ID (`#uniqueId`)
+2. Name + type (`input[name="username"][type="email"]`)
+3. Button text (`button:has-text("Sign In")`)
+4. Data attributes (`[data-testid="login-button"]`)
+
+If your target sites use different patterns, reorder the list:
+
+```typescript
+export const LOGIN_SCREEN_SYSTEM_PROMPT = `...
+
+## Locator Generation Rules
+
+Priority for robust Playwright locators:
+1. Data attributes: [data-testid="login-button"]
+2. Unique ID: #uniqueId
+3. Unique name with type: input[name="username"][type="email"]
+4. ARIA labels: [aria-label="Email address"]
+5. Button/link text: button:has-text("Sign In")
+
+...`;
+```
+
+<Tip>
+  If you're targeting a specific site with known IDs or test attributes, add explicit examples to the prompt for better accuracy.
+</Tip>
+
+### Tuning Classification Sensitivity
+
+Some pages are ambiguous—they might look like a loading screen but are actually blocked by a subtle popup. You can tune the classification by adding specific guidance.
+
+**Example: Prioritize blocked_screen detection**
+
+```typescript
+### blocked_screen
+Use when a popup/dialog blocks the login flow and must be dismissed.
+- Extract the dismiss button locator
+- **Check carefully**: Look for semi-transparent overlays, modals with "Accept"/"Dismiss"/"Close" buttons, and z-index layering. Even if the main content is visible behind it, classify as blocked_screen if interaction is prevented.
+```
+
+### Domain-Specific Patterns
+
+If you're building a login agent for a specific category of sites (e.g., enterprise SaaS, banking, government), add domain-specific hints.
+
+**Example: Banking sites with soft tokens**
+
+```typescript
+## Special Cases
+
+### Soft Token / OTP
+Banking sites often display a challenge code on screen and ask you to enter a response from your soft token device.
+- If you see text like "Enter the code from your token" or "Challenge code: 123456", classify as credential_login_form with an OTP input.
+- The challenge code itself is display-only, not an input field.
+```
+
+## Testing Prompt Changes
+
+After modifying the prompt, test it against a variety of login pages to ensure accuracy.
+
+<Steps>
+  <Step title="Run the local demo">
+    Start the dev server with your modified prompt:
+    
+    ```bash
+    npm run dev
+    ```
+  </Step>
+  
+  <Step title="Test multiple sites">
+    Try login URLs that exercise different screen types:
+    - Simple email + password
+    - Multi-step flows
+    - SSO pickers
+    - Magic links
+    - Sites with popups
+  </Step>
+  
+  <Step title="Check the logs">
+    Look at the classification output in the log panel. If the AI misclassifies a screen, note the URL and HTML.
+  </Step>
+  
+  <Step title="Iterate">
+    Add clarifying language to the prompt and re-test.
+  </Step>
+</Steps>
+
+<Warning>
+  LLMs can be sensitive to small wording changes. If you make significant modifications, test thoroughly before deploying to production.
+</Warning>
+
+## Advanced: Few-Shot Examples
+
+For very specialized domains, consider adding few-shot examples directly to the prompt. This shows Claude exactly what you mean.
+
+**Example:**
+
+```typescript
+export const LOGIN_SCREEN_SYSTEM_PROMPT = `...
+
+## Examples
+
+### Example 1: SSO Picker
+HTML: <button id="google-sso">Sign in with Google</button><button id="ms-sso">Sign in with Microsoft</button>
+Classification: choice_screen
+Options: [{ optionText: "Sign in with Google", optionPlaywrightLocator: "#google-sso" }, ...]
+
+### Example 2: Password Reset Link
+HTML: <p>We sent a password reset link to your email.</p><p>Check your inbox and click the link to continue.</p>
+Classification: magic_login_link
+
+...`;
+```
+
+<Note>
+  Few-shot examples increase token usage. Use sparingly and only for edge cases the model struggles with.
+</Note>
+
+## Prompt Best Practices
+
+<Accordion title="Be specific about edge cases">
+  If the model confuses two screen types (e.g., `loading_screen` vs `blocked_screen`), add explicit differentiators:
+  
+  ```
+  ### loading_screen
+  Use when the page is still loading (spinner, blank, empty body).
+  **Do not use if**: A spinner is visible but the page also has clickable elements underneath. That's likely a blocked_screen.
+  ```
+</Accordion>
+
+<Accordion title="Use structured formatting">
+  The prompt uses headings, bullet points, and bold text. This helps Claude parse instructions correctly.
+</Accordion>
+
+<Accordion title="Order matters for locators">
+  List locator strategies from most to least reliable. Claude will prioritize earlier rules.
+</Accordion>
+
+<Accordion title="Avoid negations when possible">
+  Instead of "Do not use choice_screen if there are input fields", say "Use credential_login_form when you see input fields."
+</Accordion>
+
+## Example: Custom Prompt for E-commerce
+
+Here's a modified prompt for e-commerce sites that often have guest checkout vs. account login:
+
+```typescript
+export const ECOMMERCE_LOGIN_PROMPT = `You are an AI agent that analyzes e-commerce login and checkout pages.
+
+Your task is to analyze the provided HTML and screenshot to determine what type of screen this is.
+
+## Screen Types
+
+### credential_login_form
+Use when you see input fields for email/password with a login button.
+- Exclude "Continue as guest" buttons from the submit field—those belong to choice_screen.
+
+### choice_screen
+Use when you see options like:
+- "Login to existing account" vs "Continue as guest"
+- "Checkout with PayPal" vs "Checkout with Credit Card"
+
+### logged_in_screen
+Use when the user is logged in and sees:
+- Account dropdown with email/username
+- "My Orders" or "Account Settings" links
+- Checkout page with pre-filled shipping address
+
+### checkout_complete
+Use when the order is complete and you see:
+- Order confirmation number
+- "Thank you for your order" message
+- Receipt or tracking information
+
+## Locator Generation Rules
+
+Priority:
+1. Data attributes: [data-testid="..."]
+2. Unique ID: #checkout-email
+3. Name attribute: input[name="email"]
+4. Button text: button:has-text("Place Order")
+
+## Exclusions
+
+Exclude: promotional banners, upsell popups, newsletter signup forms, "Save 10%" overlays.
+`;
+```
+
+## Debugging Prompt Issues
+
+If the LLM consistently misclassifies pages:
+
+<Steps>
+  <Step title="Check the stripped HTML">
+    Add logging to `agent.ts` to see what HTML is being sent:
+    
+    ```typescript
+    console.log("HTML sent to LLM:", html.substring(0, 1000));
+    ```
+    
+    If critical elements are missing, adjust the extraction logic in `browser.ts:145-190`.
+  </Step>
+  
+  <Step title="Review the screenshot">
+    Save the screenshot to disk for manual inspection:
+    
+    ```typescript
+    import fs from "fs";
+    fs.writeFileSync("/tmp/debug.jpg", Buffer.from(screenshot, "base64"));
+    ```
+  </Step>
+  
+  <Step title="Test with explicit examples">
+    If a specific pattern fails, add a few-shot example to the prompt showing the correct classification.
+  </Step>
+</Steps>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Integrating Login Machine" icon="plug" href="/guides/integrating-login-machine">
+    Learn how to use custom prompts in your integration
+  </Card>
+  
+  <Card title="Troubleshooting" icon="wrench" href="/guides/troubleshooting">
+    Debug common issues with classification and locators
+  </Card>
+</CardGroup>

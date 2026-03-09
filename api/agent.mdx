@@ -1,0 +1,282 @@
+---
+title: 'Agent'
+description: 'The brain of the Login Machine — analyzes screens and orchestrates login flows'
+---
+
+The Agent module is the core intelligence layer that analyzes login pages using vision-based AI and routes actions based on classified screen types.
+
+## Key Design Principles
+
+1. **Observe, don't assume** — every action is followed by a fresh analysis
+2. **Validate before acting** — LLM locators are checked against the live DOM
+3. **Fail forward with context** — errors are fed back for self-correction
+
+## analyzeLoginPage
+
+Screenshots the page, sends it with stripped HTML to the LLM, and receives a structured screen classification.
+
+```typescript
+async function analyzeLoginPage(
+  session: BrowserSession
+): Promise<{ screen: LoginState; screenshot: string }>
+```
+
+<ParamField path="session" type="BrowserSession" required>
+  The active browser session containing the page to analyze
+</ParamField>
+
+### Returns
+
+<ResponseField name="screen" type="LoginState">
+  The classified screen type with Playwright locators for all interactive elements
+</ResponseField>
+
+<ResponseField name="screenshot" type="string">
+  Base64-encoded JPEG screenshot (quality 80) of the current page state
+</ResponseField>
+
+### Validation & Self-Correction Loop
+
+The function includes a three-step validation process:
+
+1. **Zod schema parsing** — output must match the expected shape
+2. **Element existence** — every Playwright locator is checked against the DOM
+3. **Retry with context** — if validation fails, errors are fed back to the LLM
+
+<Note>
+The maximum number of analysis retries is controlled by `MAX_ANALYSIS_RETRIES = 3`.
+</Note>
+
+### Usage Example
+
+```typescript
+import { analyzeLoginPage } from '@/lib/ai-login/agent';
+import { createSession } from '@/lib/ai-login/browser';
+
+const session = await createSession();
+await session.page.goto('https://accounts.google.com');
+
+const { screen, screenshot } = await analyzeLoginPage(session);
+
+console.log('Screen type:', screen.type);
+// Screen type: credential_login_form
+
+if (screen.type === 'credential_login_form') {
+  console.log('Fields:', screen.inputs?.map(i => i.name));
+  // Fields: ['identifier', 'password']
+}
+```
+
+### Error Handling
+
+When locators fail validation, the error history is appended to subsequent prompts:
+
+```typescript
+const errorContext = `
+<error-history>
+Attempt 1: Locators not found on page: input[name="email"], button[type="submit"]
+Attempt 2: Locators not found on page: #login-button
+</error-history>
+`;
+```
+
+After exhausting retries, the function returns the best-effort result without validation.
+
+---
+
+## handleScreen
+
+Routes to the appropriate handler based on screen type and executes the corresponding action.
+
+```typescript
+async function handleScreen(
+  session: BrowserSession,
+  screen: LoginState,
+  userInput?: Record<string, string>
+): Promise<{ nextScreen: LoginState | null; message: AgentMessage }>
+```
+
+<ParamField path="session" type="BrowserSession" required>
+  The active browser session
+</ParamField>
+
+<ParamField path="screen" type="LoginState" required>
+  The classified screen from `analyzeLoginPage()`
+</ParamField>
+
+<ParamField path="userInput" type="Record<string, string>">
+  User-provided values for form fields, choices, or magic links
+  
+  Examples:
+  - `{ email: "user@example.com", password: "***" }` for credential forms
+  - `{ choice: "Use email instead" }` for choice screens
+  - `{ url: "https://magic-link.com/verify?token=..." }` for magic links
+</ParamField>
+
+### Returns
+
+<ResponseField name="nextScreen" type="LoginState | null">
+  The next screen after auto-handled actions (loading_screen, blocked_screen) or `null` for user action screens that require re-analysis via SSE
+</ResponseField>
+
+<ResponseField name="message" type="AgentMessage">
+  Describes what happened — can be a thought, action, input request, completion, or error
+</ResponseField>
+
+### Screen Type Handlers
+
+<Accordion title="credential_login_form">
+  Fills input fields and clicks the submit button.
+  
+  **Behavior:**
+  - Validates that `userInput` contains values for the detected fields
+  - Maps user input to Playwright locators
+  - Calls `fillAndSubmit()` from the browser module
+  - Returns `nextScreen: null` — route handler analyzes via SSE
+  
+  **Example:**
+  ```typescript
+  const result = await handleScreen(session, screen, {
+    email: 'user@example.com',
+    password: 'secure123'
+  });
+  // Returns: { nextScreen: null, message: { type: 'action', action: 'Filled form and submitted' } }
+  ```
+</Accordion>
+
+<Accordion title="choice_screen">
+  Clicks the selected option from a list of choices.
+  
+  **Behavior:**
+  - Finds the matching option by `optionText`
+  - Clicks the option using its Playwright locator
+  - If a separate submit button exists, clicks it after selecting
+  - Returns `nextScreen: null` — route handler analyzes via SSE
+  
+  **Example:**
+  ```typescript
+  const result = await handleScreen(session, screen, {
+    choice: 'Use email instead'
+  });
+  // Returns: { nextScreen: null, message: { type: 'action', action: 'Selected: Use email instead' } }
+  ```
+</Accordion>
+
+<Accordion title="magic_login_link">
+  Navigates to the magic link URL provided by the user.
+  
+  **Behavior:**
+  - Navigates to `userInput.url`
+  - Waits for page load state
+  - Returns `nextScreen: null` — route handler analyzes via SSE
+  
+  **Example:**
+  ```typescript
+  const result = await handleScreen(session, screen, {
+    url: 'https://app.example.com/verify?token=abc123'
+  });
+  // Returns: { nextScreen: null, message: { type: 'action', action: 'Navigated to magic link' } }
+  ```
+</Accordion>
+
+<Accordion title="blocked_screen">
+  Auto-dismisses blocking elements (popups, cookie banners, etc.) and re-analyzes.
+  
+  **Behavior:**
+  - Clicks the dismiss locator
+  - Immediately calls `analyzeLoginPage()` to get the new screen
+  - Returns the new screen directly (not `null`)
+  
+  **Example:**
+  ```typescript
+  const result = await handleScreen(session, screen);
+  // Returns: { nextScreen: <LoginState>, message: { type: 'action', action: 'Dismissed blocking popup' } }
+  ```
+</Accordion>
+
+<Accordion title="loading_screen">
+  Waits for the page to finish loading and re-analyzes.
+  
+  **Behavior:**
+  - Calls `waitForPageContent()` to wait for meaningful content
+  - Re-analyzes the page
+  - Returns the new screen directly (not `null`)
+  
+  **Example:**
+  ```typescript
+  const result = await handleScreen(session, screen);
+  // Returns: { nextScreen: <LoginState>, message: { type: 'thought', content: 'Page was loading, waiting...' } }
+  ```
+</Accordion>
+
+<Accordion title="logged_in_screen">
+  Terminal state — login succeeded.
+  
+  **Behavior:**
+  - Returns success message
+  - No further actions needed
+  
+  **Example:**
+  ```typescript
+  const result = await handleScreen(session, screen);
+  // Returns: { nextScreen: null, message: { type: 'complete', success: true, message: 'Successfully logged in!' } }
+  ```
+</Accordion>
+
+### Usage Example
+
+```typescript
+import { analyzeLoginPage, handleScreen } from '@/lib/ai-login/agent';
+import { createSession } from '@/lib/ai-login/browser';
+
+const session = await createSession();
+await session.page.goto('https://example.com/login');
+
+let { screen } = await analyzeLoginPage(session);
+
+while (screen.type !== 'logged_in_screen') {
+  const result = await handleScreen(session, screen, {
+    email: 'user@example.com',
+    password: 'secure123'
+  });
+  
+  if (result.message.type === 'complete') {
+    console.log('Login succeeded!');
+    break;
+  }
+  
+  if (result.nextScreen) {
+    screen = result.nextScreen;
+  } else {
+    // Re-analyze after user action
+    ({ screen } = await analyzeLoginPage(session));
+  }
+}
+```
+
+---
+
+## Constants
+
+<ParamField path="MAX_ANALYSIS_RETRIES" type="number" default="3">
+  Maximum number of validation retries when locators fail to resolve
+</ParamField>
+
+---
+
+## Model Configuration
+
+The agent uses **Claude Sonnet 4.5** (`claude-sonnet-4-5-20250929`) with structured output for screen classification.
+
+```typescript
+const { output: object } = await generateText({
+  model: anthropic("claude-sonnet-4-5-20250929"),
+  output: Output.object({ schema: LoginStateSchema }),
+  system: LOGIN_SCREEN_SYSTEM_PROMPT,
+  messages: [/* ... */]
+});
+```
+
+<Warning>
+User action screens (`credential_login_form`, `choice_screen`, `magic_login_link`) return `nextScreen: null` because page re-analysis is handled by the API route via SSE. This allows the frontend to update form status in real time.
+</Warning>

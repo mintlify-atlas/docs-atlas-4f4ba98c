@@ -1,0 +1,554 @@
+---
+title: Troubleshooting
+description: Debug common issues with Login Machine and fix difficult login flows
+---
+
+## Common Issues
+
+### Locator Failures
+
+<Accordion title="Locator not found on page">
+  **Symptom:**
+  
+  The agent returns a screen classification, but when it tries to interact with the page, the locator doesn't match any elements.
+  
+  **Cause:**
+  
+  The LLM generated a selector that doesn't exist in the live DOM, or the element is inside an iframe/shadow DOM that wasn't properly traversed.
+  
+  **Solution:**
+  
+  The Login Machine includes automatic locator validation and retry. If a locator fails, the error is fed back to the LLM for self-correction (up to 3 attempts):
+  
+  ```typescript
+  // From agent.ts:136-156
+  const results = await Promise.all(
+    locators.map(async (loc) => ({
+      locator: loc,
+      exists: await validateLocator(session, loc),
+    })),
+  );
+  
+  const missing = results.filter((r) => !r.exists);
+  if (missing.length === 0) {
+    return { screen: object, screenshot };
+  }
+  
+  const errorMsg = `Locators not found on page: ${missing.map((m) => m.locator).join(", ")}. Please generate alternative locators.`;
+  console.warn(`[agent] Validation failed: ${errorMsg}`);
+  errorHistory.push({ error: errorMsg });
+  ```
+  
+  If retries are exhausted, check:
+  
+  1. **Is the element in an iframe?** The system searches across frames, but cross-origin iframes can't be accessed.
+  2. **Is the element in a shadow DOM?** The HTML extractor traverses shadow roots, but nested shadow DOMs may be missed.
+  3. **Is the element hidden?** The extractor filters out `display: none` and `visibility: hidden` elements.
+  
+  **Manual Fix:**
+  
+  If the auto-retry doesn't work, modify the locator priority in the prompt (see [Customizing Prompts](/guides/customizing-prompts)).
+</Accordion>
+
+<Accordion title="Wrong element clicked">
+  **Symptom:**
+  
+  The agent clicks a different button than intended (e.g., clicks "Sign Up" instead of "Log In").
+  
+  **Cause:**
+  
+  The LLM generated a locator that matches multiple elements, and Playwright clicked the first one.
+  
+  **Solution:**
+  
+  Add more specific guidance to the prompt about which buttons to exclude:
+  
+  ```typescript
+  ## Exclusions
+  
+  Exclude: hidden/disabled fields, cookie banners, social login buttons (Google/Apple/Microsoft), help/privacy/forgot-password links, **sign-up links**, "Create Account" buttons.
+  ```
+  
+  You can also modify the locator validation to check for uniqueness:
+  
+  ```typescript
+  async function validateLocator(
+    session: BrowserSession,
+    locator: string,
+  ): Promise<boolean> {
+    const count = await session.page.locator(locator).count();
+    if (count > 1) {
+      console.warn(`Locator matches ${count} elements: ${locator}`);
+      return false; // Force the LLM to be more specific
+    }
+    return count === 1;
+  }
+  ```
+</Accordion>
+
+<Accordion title="Element inside iframe not detected">
+  **Symptom:**
+  
+  The login form is inside an iframe (common with enterprise SSO widgets), but the agent doesn't see it.
+  
+  **Cause:**
+  
+  Cross-origin iframes are blocked by browser security. Same-origin iframes should work, but nested iframes might be missed.
+  
+  **Solution:**
+  
+  Check the iframe extraction logic in `browser.ts:195-205`:
+  
+  ```typescript
+  for (const frame of page.frames()) {
+    if (frame !== page.mainFrame()) {
+      try {
+        const iframeHtml = await frame.evaluate(extractBodyHTML);
+        bodyHtml += `<iframe-content>${iframeHtml}</iframe-content>`;
+      } catch {
+        // Cross-origin frames can't be read
+      }
+    }
+  }
+  ```
+  
+  If the iframe is same-origin but still not detected, add logging to see if it's being traversed:
+  
+  ```typescript
+  console.log("Frames:", page.frames().map(f => f.url()));
+  ```
+</Accordion>
+
+### Classification Errors
+
+<Accordion title="Page misclassified as loading_screen">
+  **Symptom:**
+  
+  The agent thinks the page is still loading, even though the content is fully visible.
+  
+  **Cause:**
+  
+  The page might have a spinner or "Loading..." text that the LLM interprets as a loading state.
+  
+  **Solution:**
+  
+  The system includes a loading retry mechanism (max 12 attempts). If the page stays in `loading_screen` for too long, it will timeout:
+  
+  ```typescript
+  // From use-login-session.ts:204-234
+  case "loading_screen": {
+    loadingRetries.current += 1;
+    if (loadingRetries.current >= MAX_LOADING_RETRIES) {
+      replaceLastLoading({
+        role: "assistant",
+        type: "error",
+        text: "Page failed to load after multiple retries.",
+      });
+      log("error", "Max loading retries exceeded");
+      setBusy(false);
+      loadingRetries.current = 0;
+    } else {
+      autoRetryRef.current?.(sid, screen);
+    }
+    break;
+  }
+  ```
+  
+  If the page should be classified differently, update the prompt to be more specific:
+  
+  ```typescript
+  ### loading_screen
+  Use when the page is still loading (spinner, blank, empty body).
+  **Do not use if**: The spinner is cosmetic and the page has interactive elements (buttons, input fields). Classify based on the visible content, not the spinner.
+  ```
+</Accordion>
+
+<Accordion title="Logged-in screen not detected">
+  **Symptom:**
+  
+  The agent successfully logs in, but doesn't recognize the post-login page as `logged_in_screen`.
+  
+  **Cause:**
+  
+  The success indicators (dashboard, profile dropdown, welcome message) might not be visible in the viewport when the screenshot is taken.
+  
+  **Solution:**
+  
+  Add domain-specific patterns to the prompt:
+  
+  ```typescript
+  ### logged_in_screen
+  Use when the user is successfully logged in (dashboard visible, profile dropdown, welcome message).
+  - Look for: navigation bars with "Settings"/"Profile"/"Logout" links
+  - Look for: personalized greetings like "Welcome, [name]"
+  - Look for: URLs containing "/dashboard", "/home", "/app"
+  - **NO login forms visible**
+  ```
+  
+  You can also check the URL as a fallback:
+  
+  ```typescript
+  // After analyzeLoginPage
+  if (screen.type !== "logged_in_screen" && session.page.url().includes("/dashboard")) {
+    console.log("URL suggests logged in, overriding classification");
+    screen = { type: "logged_in_screen" };
+  }
+  ```
+</Accordion>
+
+<Accordion title="Choice screen vs credential form confusion">
+  **Symptom:**
+  
+  A page with both SSO buttons and an email/password form is classified as `choice_screen` when it should be `credential_login_form`, or vice versa.
+  
+  **Cause:**
+  
+  Ambiguous page layout. The LLM prioritizes one over the other based on visual prominence.
+  
+  **Solution:**
+  
+  Clarify the distinction in the prompt:
+  
+  ```typescript
+  ### credential_login_form
+  Use when you see input fields for credentials (email, password, text, tel, OTP, select) with a submit button.
+  - **If both SSO buttons and credential inputs are present**, classify as credential_login_form. SSO buttons should be excluded (see Exclusions).
+  
+  ### choice_screen
+  Use when you see multiple buttons/links representing choices (account selector, company picker, MFA method selection).
+  - **Only use this if there are NO credential input fields on the page.**
+  ```
+</Accordion>
+
+### Form Submission Issues
+
+<Accordion title="Form submitted but page doesn't change">
+  **Symptom:**
+  
+  The agent fills the form and clicks submit, but the page stays the same or shows a validation error.
+  
+  **Cause:**
+  
+  1. **Client-side validation failed**: JavaScript prevented the form submission.
+  2. **SPA navigation**: The page uses a single-page app framework and doesn't trigger a full reload.
+  3. **Slow response**: The server is taking longer than the wait timeout.
+  
+  **Solution:**
+  
+  The system waits 3 seconds after clicking submit, then re-analyzes:
+  
+  ```typescript
+  // From browser.ts:271-293
+  export async function fillAndSubmit(
+    page: Page,
+    inputs: Array<{ locator: string; value: string }>,
+    submitLocator: string,
+  ): Promise<void> {
+    for (const { locator, value } of inputs) {
+      const filled = await fillInPageOrFrame(page, locator, value);
+      if (!filled) {
+        console.warn(`[browser] Could not find element for locator: ${locator}`);
+      }
+    }
+  
+    await clickInPageOrFrame(page, submitLocator);
+  
+    // Wait for navigation / redirects
+    await page.waitForLoadState("load").catch(() => {});
+    await page.waitForTimeout(3000);
+  }
+  ```
+  
+  If the page still doesn't change, increase the timeout or add a custom wait condition:
+  
+  ```typescript
+  await page.waitForURL(url => !url.includes('/login'), { timeout: 10000 });
+  ```
+</Accordion>
+
+<Accordion title="Credentials not filled correctly">
+  **Symptom:**
+  
+  The agent fills the email field, but the password field is empty or has the wrong value.
+  
+  **Cause:**
+  
+  1. **JavaScript interference**: The site uses a custom input component that doesn't respond to `element.fill()`.
+  2. **Timing issue**: The field wasn't ready when the agent tried to fill it.
+  
+  **Solution:**
+  
+  The fill logic waits for the element to be attached and focuses it before filling:
+  
+  ```typescript
+  // From browser.ts:308-323
+  async function fillInPageOrFrame(
+    page: Page,
+    locator: string,
+    value: string,
+  ): Promise<boolean> {
+    try {
+      const el = page.locator(locator).first();
+      if ((await el.count()) > 0) {
+        await el.waitFor({ state: "attached", timeout: 5000 });
+        await el.focus();
+        await el.clear();
+        await el.fill(value);
+        return true;
+      }
+    } catch (e) {
+      console.warn(`[browser] Main frame fill failed for ${locator}:`, e);
+    }
+    // ... try iframes
+  }
+  ```
+  
+  For stubborn custom inputs, try using `page.type()` instead:
+  
+  ```typescript
+  await el.clear();
+  await page.keyboard.type(value, { delay: 100 });
+  ```
+</Accordion>
+
+<Accordion title="Form validation errors not detected">
+  **Symptom:**
+  
+  The agent submits the form with invalid data (e.g., wrong password), but doesn't recognize the error message.
+  
+  **Cause:**
+  
+  The error message appears after re-analysis, but the LLM doesn't extract it into the `errorMessage` field.
+  
+  **Solution:**
+  
+  The prompt includes error detection instructions:
+  
+  ```typescript
+  ### credential_login_form
+  - **Error detection**: If the page shows an error message (e.g. "Your email or password is incorrect", "Invalid credentials", "Account not found"), set the errorMessage field on the most relevant input(s) with the exact error text.
+  ```
+  
+  If errors are still missed, add explicit patterns:
+  
+  ```typescript
+  ### credential_login_form
+  - **Error detection**: Look for text in red, near the form, containing words like "invalid", "incorrect", "failed", "not found", "try again". Extract the full error message.
+  ```
+</Accordion>
+
+## Debugging Techniques
+
+### Enable Verbose Logging
+
+Add console logs to track the agent's decisions:
+
+```typescript
+// In agent.ts
+console.log("[agent] Analyzing page...");
+console.log("[agent] Screen type:", screen.type);
+console.log("[agent] Locators:", getScreenLocators(screen));
+```
+
+```typescript
+// In browser.ts
+console.log("[browser] Filling locator:", locator);
+console.log("[browser] Clicking locator:", locator);
+```
+
+### Save Screenshots for Inspection
+
+Capture the screenshot before sending it to the LLM:
+
+```typescript
+import fs from "fs";
+
+const { html, screenshot, url } = await getPageContext(session.page);
+fs.writeFileSync(
+  `/tmp/screenshot-${Date.now()}.jpg`,
+  Buffer.from(screenshot, "base64"),
+);
+```
+
+### Inspect Stripped HTML
+
+Log the HTML sent to the LLM to see if critical elements are missing:
+
+```typescript
+console.log("HTML sent to LLM:", html.substring(0, 2000));
+```
+
+### Test Locators Manually
+
+Open the BrowserBase debugger URL and test locators in the browser console:
+
+```javascript
+document.querySelector("input[name='email']"); // Should return the element
+```
+
+### Use BrowserBase Session Recording
+
+BrowserBase provides a full recording of every session. If something goes wrong, watch the replay to see exactly what the browser did:
+
+```typescript
+const session = await createSession();
+console.log("View session:", session.liveViewUrl);
+```
+
+## Handling Difficult Login Flows
+
+### Captchas
+
+<Warning>
+  The Login Machine cannot solve captchas automatically. If a captcha appears, the flow will fail.
+</Warning>
+
+**Workaround:**
+
+If you control the test environment, disable captchas for your test accounts. Alternatively, use a captcha-solving service like 2Captcha or AntiCaptcha and integrate it into the agent.
+
+### Multi-Factor Authentication (MFA)
+
+MFA flows with OTP codes sent via SMS or email are supported if you have access to the code.
+
+**SMS OTP:**
+
+1. The agent detects a `credential_login_form` with an `otp` input.
+2. You manually retrieve the code from your phone or an SMS API.
+3. You enter the code in the form.
+
+**TOTP (Authenticator Apps):**
+
+Integrate a TOTP library like `otplib` to generate codes programmatically:
+
+```typescript
+import { authenticator } from "otplib";
+
+const secret = "YOUR_TOTP_SECRET";
+const code = authenticator.generate(secret);
+
+const { message } = await handleScreen(session, screen, {
+  otp: code,
+});
+```
+
+### Social Login (Google, Microsoft, etc.)
+
+The default prompt excludes social login buttons:
+
+```typescript
+## Exclusions
+
+Exclude: hidden/disabled fields, cookie banners, **social login buttons (Google/Apple/Microsoft)**, help/privacy/forgot-password links, sign-up links.
+```
+
+If you want to support social login, remove this exclusion and add a new screen type:
+
+```typescript
+### social_login_redirect
+Use when the user is redirected to a third-party login page (Google, Microsoft, Okta, etc.).
+- The URL domain is different from the original site.
+- The page has a branded login form (Google logo, Microsoft branding).
+```
+
+Then handle the redirect in `handleScreen()`.
+
+### Magic Links with Browser State
+
+Some magic links only work if you open them in the same browser session that requested them. The Login Machine handles this by navigating the existing session to the magic link URL:
+
+```typescript
+// From agent.ts:268-286
+case "magic_login_link": {
+  if (!userInput?.url) {
+    return {
+      nextScreen: null,
+      message: { type: "input_request", screen },
+    };
+  }
+
+  await session.page.goto(userInput.url, { waitUntil: "domcontentloaded" });
+  await session.page.waitForLoadState("load").catch(() => {});
+
+  // Return null — route handler will analyze via SSE
+  return {
+    nextScreen: null,
+    message: { type: "action", action: "Navigated to magic link" },
+  };
+}
+```
+
+This preserves cookies and session state.
+
+## Performance Optimization
+
+### Reduce Token Usage
+
+The HTML extractor strips scripts, styles, and images to reduce tokens:
+
+```typescript
+// From browser.ts:155-156
+const exclude = ["SCRIPT", "STYLE", "svg", "IMG", "NOSCRIPT", "LINK"];
+if (exclude.includes(el.tagName)) return "";
+```
+
+If your pages are still too large, add more exclusions:
+
+```typescript
+const exclude = ["SCRIPT", "STYLE", "svg", "IMG", "NOSCRIPT", "LINK", "FOOTER", "ASIDE"];
+```
+
+### Skip Unnecessary Screenshots
+
+If you trust the HTML analysis alone, you can skip the screenshot step (not recommended, but faster):
+
+```typescript
+// Modify generateText call to omit the image
+messages: [
+  {
+    role: "user",
+    content: [
+      { type: "text", text: `Current URL: ${url}\n\nHTML:\n${html}` },
+      // Remove: { type: "image", image: `data:image/jpeg;base64,${screenshot}` },
+    ],
+  },
+],
+```
+
+### Cache Session Connections
+
+If you're running multiple login attempts in parallel, reuse BrowserBase sessions instead of creating new ones:
+
+```typescript
+const sessionPool: Record<string, BrowserSession> = {};
+
+async function getOrCreateSession(key: string): Promise<BrowserSession> {
+  if (!sessionPool[key]) {
+    sessionPool[key] = await createSession();
+  }
+  return sessionPool[key];
+}
+```
+
+## Getting Help
+
+If you encounter an issue not covered here:
+
+<CardGroup cols={2}>
+  <Card title="GitHub Issues" icon="github" href="https://github.com/RichardHruby/login-machine/issues">
+    Report bugs or request features
+  </Card>
+  
+  <Card title="Community" icon="users" href="https://github.com/RichardHruby/login-machine/discussions">
+    Ask questions and share solutions
+  </Card>
+</CardGroup>
+
+<Tip>
+  When reporting an issue, include:
+  - The login URL you're testing (if public)
+  - A screenshot of the page
+  - The stripped HTML sent to the LLM
+  - The classification result
+  - Relevant logs
+</Tip>

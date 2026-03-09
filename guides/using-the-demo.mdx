@@ -1,0 +1,299 @@
+---
+title: Using the Demo
+description: Learn how to use the Login Machine demo to test AI-powered login flows
+---
+
+## Overview
+
+The Login Machine demo is available both as a hosted application and for local development. It provides a live browser preview and an interactive chat interface to guide you through any login flow.
+
+<Info>
+  The demo is hosted at [login-machine.vercel.app](https://login-machine.vercel.app) or you can run it locally for development.
+</Info>
+
+## Using the Hosted Demo
+
+### Getting Started
+
+<Steps>
+  <Step title="Visit the demo">
+    Navigate to [login-machine.vercel.app](https://login-machine.vercel.app) in your browser.
+  </Step>
+  
+  <Step title="Enter a login URL">
+    Type or paste the URL of the login page you want to test. The URL will be normalized automatically (e.g., `gusto.com/login` becomes `https://gusto.com/login`).
+  </Step>
+  
+  <Step title="Watch the browser launch">
+    The system creates a BrowserBase session and displays the live browser view in the left panel. You'll see logs streaming in the bottom section.
+  </Step>
+  
+  <Step title="Respond to prompts">
+    Based on what the AI detects, you'll be asked to provide credentials, select options, or paste magic links in the right chat panel.
+  </Step>
+</Steps>
+
+### Quick Start Links
+
+Click one of the conversation starters to try common enterprise login flows:
+
+<CardGroup cols={3}>
+  <Card title="Gusto" icon="building">
+    `gusto.com/login`
+    
+    Multi-step email and password flow
+  </Card>
+  
+  <Card title="Rippling" icon="users">
+    `app.rippling.com/login`
+    
+    SSO selection and credentials
+  </Card>
+  
+  <Card title="Navan" icon="plane">
+    `navan.com/signin`
+    
+    Email-first authentication
+  </Card>
+</CardGroup>
+
+## Running the Demo Locally
+
+### Prerequisites
+
+- Node.js 18+ installed
+- Accounts with API keys for:
+  - [Anthropic](https://console.anthropic.com/) (Claude API)
+  - [BrowserBase](https://www.browserbase.com/) (cloud browser)
+
+### Setup
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/RichardHruby/login-machine.git
+    cd login-machine
+    ```
+  </Step>
+  
+  <Step title="Configure environment variables">
+    ```bash
+    cp .env.example .env.local
+    ```
+    
+    Edit `.env.local` and add your API keys:
+    
+    ```bash
+    ANTHROPIC_API_KEY=sk-ant-...
+    BROWSERBASE_API_KEY=...
+    BROWSERBASE_PROJECT_ID=...
+    ```
+  </Step>
+  
+  <Step title="Install dependencies">
+    ```bash
+    npm install
+    ```
+  </Step>
+  
+  <Step title="Start the development server">
+    ```bash
+    npm run dev
+    ```
+    
+    Open [http://localhost:3000](http://localhost:3000) in your browser.
+  </Step>
+</Steps>
+
+## Understanding the Interface
+
+The demo uses a two-column layout optimized for login flow visualization:
+
+### Left Column: Browser & Logs
+
+**Browser Preview (Top 55%)**
+
+Displays the live BrowserBase session in an embedded iframe. This is a real Chrome browser running in the cloud—you can watch the AI interact with the page in real time.
+
+```tsx
+// From chat.tsx:219-226
+if (liveViewUrl) {
+  return (
+    <div className="h-[55%] min-h-0 bg-black/40 relative">
+      <iframe
+        src={liveViewUrl}
+        title="Browser"
+        className="absolute inset-0 w-full h-full border-0 pointer-events-none"
+      />
+    </div>
+  );
+}
+```
+
+**Log Panel (Bottom 45%)**
+
+Shows a terminal-style log of all agent actions, thoughts, and errors. Log entries are color-coded by type:
+
+- **info**: General information (blue)
+- **action**: User or agent actions (green)
+- **thought**: Internal reasoning (gray)
+- **error**: Failures or warnings (red)
+
+### Right Column: Chat Interface
+
+The chat panel displays messages from the AI agent and dynamically renders input components based on the detected screen type.
+
+**Message Types:**
+
+<Accordion title="Input Request">
+  The AI detected a form, choice screen, or magic link requirement and is waiting for your input.
+  
+  Dynamically rendered components:
+  - `CredentialForm` for login/password/OTP fields
+  - `ChoiceButtons` for SSO/account selection
+  - `MagicLinkInput` for verification link entry
+</Accordion>
+
+<Accordion title="Loading">
+  The system is processing—launching browser, analyzing page, or waiting for navigation.
+</Accordion>
+
+<Accordion title="Success">
+  Login completed successfully. The browser is now on the logged-in screen.
+</Accordion>
+
+<Accordion title="Error">
+  Something went wrong. Check the log panel for details.
+</Accordion>
+
+## Common Workflows
+
+### Simple Email + Password
+
+<Steps>
+  <Step title="Start session">
+    Enter a login URL like `app.example.com/login`
+  </Step>
+  
+  <Step title="Fill credentials">
+    The AI detects a `credential_login_form` screen. Enter your email and password in the form that appears.
+  </Step>
+  
+  <Step title="Submit">
+    Click **Submit**. The agent fills the form in the browser and clicks the login button.
+  </Step>
+  
+  <Step title="Success">
+    After the page loads, the AI classifies it as `logged_in_screen` and displays success.
+  </Step>
+</Steps>
+
+### Multi-Step Login (Email First)
+
+Many sites ask for email first, then password on a second page.
+
+<Steps>
+  <Step title="Enter email">
+    Fill the email field and submit. The agent navigates to the next page.
+  </Step>
+  
+  <Step title="Enter password">
+    The AI re-analyzes the new page, detects another `credential_login_form`, and asks for the password.
+  </Step>
+  
+  <Step title="Complete login">
+    Submit the password. The agent completes authentication.
+  </Step>
+</Steps>
+
+### SSO / Choice Screens
+
+When a page shows multiple login options ("Sign in with Google", "Use SSO", "Sign in with email"):
+
+<Steps>
+  <Step title="View options">
+    The AI detects a `choice_screen` and displays buttons for each option.
+  </Step>
+  
+  <Step title="Select one">
+    Click the button matching your preferred login method.
+  </Step>
+  
+  <Step title="Continue flow">
+    The agent clicks the corresponding element in the browser and re-analyzes the next page.
+  </Step>
+</Steps>
+
+### Magic Links
+
+Some sites send a verification link via email instead of using a password.
+
+<Steps>
+  <Step title="Request magic link">
+    Enter your email. The site sends a verification link.
+  </Step>
+  
+  <Step title="Detect magic link screen">
+    The AI classifies the "Check your email" page as `magic_login_link`.
+  </Step>
+  
+  <Step title="Paste the link">
+    Open your email, copy the magic link URL, and paste it into the input field.
+  </Step>
+  
+  <Step title="Navigate">
+    The agent navigates the browser to the magic link and completes authentication.
+  </Step>
+</Steps>
+
+## What to Expect
+
+### Automatic Handling
+
+The following screen types are handled automatically without user input:
+
+- **Loading screens**: Spinners, blank pages, redirects
+- **Blocked screens**: Cookie banners, popups, dialogs
+- **Logged-in screens**: Terminal success state
+
+### Max Retries
+
+If a page stays in a loading state for too long, the system will retry up to **12 times** before giving up. This is defined in `use-login-session.ts:60`:
+
+```typescript
+const MAX_LOADING_RETRIES = 12;
+```
+
+### Form Validation Errors
+
+If you enter incorrect credentials, the AI will detect error messages on the page and display them inline on the form. The system extracts error text and associates it with the relevant input field:
+
+```typescript
+// From use-login-session.ts:167-174
+if (screen.type === "credential_login_form" && screen.inputs) {
+  const errors = screen.inputs
+    .filter((i) => i.errorMessage)
+    .map((i) => i.errorMessage!);
+  if (errors.length > 0) {
+    log("error", `Login error: ${errors.join("; ")}`);
+  }
+}
+```
+
+## Tips for Best Results
+
+<Tip>
+  Use full URLs or domains with paths, e.g., `app.example.com/login` rather than just `example.com`.
+</Tip>
+
+<Tip>
+  If the AI misclassifies a screen, check the log panel for details. You can reset the session and try again.
+</Tip>
+
+<Tip>
+  For enterprise SSO flows, make sure you select the correct option on choice screens—the AI can't infer which one you need.
+</Tip>
+
+<Warning>
+  The demo uses your actual credentials to log in. Your credentials are sent directly to the browser DOM and never exposed to the AI model.
+</Warning>

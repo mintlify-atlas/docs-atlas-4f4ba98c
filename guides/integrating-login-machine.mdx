@@ -1,0 +1,500 @@
+---
+title: Integrating Login Machine
+description: How to integrate the ai-login modules into your own project
+---
+
+## Overview
+
+The Login Machine's core logic lives in the `src/lib/ai-login/` directory. These modules are designed to be portable and can be integrated into any Node.js or TypeScript project that needs automated login capabilities.
+
+<Info>
+  The AI login modules are framework-agnostic. They work with Playwright and the Vercel AI SDK, so you can use them in any JavaScript runtime that supports these libraries.
+</Info>
+
+## Core Modules
+
+The ai-login library consists of four main modules:
+
+<CardGroup cols={2}>
+  <Card title="agent.ts" icon="brain">
+    LLM-powered screen analysis and action routing
+    
+    **Key functions:**
+    - `analyzeLoginPage()`
+    - `handleScreen()`
+  </Card>
+  
+  <Card title="browser.ts" icon="window">
+    BrowserBase session management and Playwright automation
+    
+    **Key functions:**
+    - `createSession()`
+    - `getSession()`
+    - `fillAndSubmit()`
+  </Card>
+  
+  <Card title="types.ts" icon="code">
+    Zod schemas for screen classification and validation
+    
+    **Key exports:**
+    - `LoginStateSchema`
+    - `ScreenType`
+  </Card>
+  
+  <Card title="prompts.ts" icon="message-lines">
+    System prompt for Claude
+    
+    **Key exports:**
+    - `LOGIN_SCREEN_SYSTEM_PROMPT`
+  </Card>
+</CardGroup>
+
+## Installation
+
+### 1. Copy the ai-login Directory
+
+Copy the entire `src/lib/ai-login/` directory into your project:
+
+```bash
+cp -r login-machine/src/lib/ai-login/ your-project/src/lib/
+```
+
+### 2. Install Dependencies
+
+Add the required npm packages:
+
+```bash
+npm install ai @ai-sdk/anthropic zod playwright
+```
+
+### 3. Configure Environment Variables
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-...
+BROWSERBASE_API_KEY=...
+BROWSERBASE_PROJECT_ID=...
+```
+
+## Basic Usage
+
+### Minimal Example
+
+Here's a complete example that logs into a website and returns when authentication is complete:
+
+```typescript
+import {
+  createSession,
+  analyzeLoginPage,
+  handleScreen,
+  type LoginState,
+} from "./lib/ai-login";
+
+async function login(url: string, credentials: Record<string, string>) {
+  // 1. Create a BrowserBase session
+  const session = await createSession();
+  
+  // 2. Navigate to the login page
+  await session.page.goto(url, { waitUntil: "domcontentloaded" });
+  await session.page.waitForLoadState("load").catch(() => {});
+  
+  // 3. Start the agent loop
+  let currentScreen: LoginState | null = null;
+  
+  while (true) {
+    // Analyze the current page
+    const { screen } = await analyzeLoginPage(session);
+    currentScreen = screen;
+    
+    console.log(`Detected: ${screen.type}`);
+    
+    // Terminal state: logged in
+    if (screen.type === "logged_in_screen") {
+      console.log("Login successful!");
+      break;
+    }
+    
+    // Handle the screen (auto-handled screens will return nextScreen)
+    const { nextScreen, message } = await handleScreen(
+      session,
+      screen,
+      credentials,
+    );
+    
+    if (message.type === "error") {
+      throw new Error(message.message);
+    }
+    
+    // If nextScreen is null, re-analyze the page
+    if (nextScreen) {
+      currentScreen = nextScreen;
+    }
+  }
+  
+  // 4. Session is now logged in
+  return session;
+}
+
+// Usage
+const session = await login("https://app.example.com/login", {
+  email: "user@example.com",
+  password: "secretpassword",
+});
+
+// Continue using session.page for authenticated actions
+await session.page.goto("/dashboard");
+```
+
+## Advanced Integration
+
+### Server-Sent Events for Real-Time Updates
+
+The Login Machine demo uses SSE to stream progress updates to the frontend. Here's how to implement a similar pattern:
+
+```typescript
+import { analyzeLoginPage, handleScreen } from "./lib/ai-login";
+import { type LoginState } from "./lib/ai-login/types";
+
+export async function POST(req: Request) {
+  const { action, sessionId, screen, values } = await req.json();
+  
+  // Create SSE stream
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      try {
+        // Get existing session
+        const session = await getSession(sessionId);
+        
+        // Handle the screen with user input
+        const { nextScreen, message } = await handleScreen(
+          session,
+          screen,
+          values,
+        );
+        
+        // Send action completion event
+        if (message.type === "action") {
+          controller.enqueue(
+            encoder.encode(
+              `event: action_complete\ndata: ${JSON.stringify({ action: message.action })}\n\n`,
+            ),
+          );
+        }
+        
+        // Re-analyze page after user action
+        const { screen: newScreen } = await analyzeLoginPage(session);
+        
+        // Send screen classification event
+        controller.enqueue(
+          encoder.encode(
+            `event: screen\ndata: ${JSON.stringify({ screen: newScreen })}\n\n`,
+          ),
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        controller.enqueue(
+          encoder.encode(
+            `event: error\ndata: ${JSON.stringify({ message })}\n\n`,
+          ),
+        );
+      } finally {
+        controller.close();
+      }
+    },
+  });
+  
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  });
+}
+```
+
+### Managing BrowserBase Sessions
+
+#### Creating a New Session
+
+BrowserBase sessions are created via their REST API and then connected to Playwright over CDP:
+
+```typescript
+import { createSession } from "./lib/ai-login/browser";
+
+// Creates a new cloud browser and returns a Playwright Page
+const session = await createSession();
+
+console.log("Session ID:", session.sessionId);
+console.log("Live view:", session.liveViewUrl);
+
+// Use the page
+await session.page.goto("https://example.com");
+```
+
+From `browser.ts:76-104`:
+
+```typescript
+export async function createSession(): Promise<BrowserSession> {
+  const apiKey = getApiKey();
+  const projectId = process.env.BROWSERBASE_PROJECT_ID;
+  if (!projectId) throw new Error("BROWSERBASE_PROJECT_ID must be set");
+
+  const res = await fetch("https://api.browserbase.com/v1/sessions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-bb-api-key": apiKey },
+    body: JSON.stringify({
+      projectId,
+      browserSettings: { viewport: { width: 1280, height: 800 } },
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(
+      `BrowserBase session creation failed: ${res.statusText}${body ? ` — ${body}` : ""}`,
+    );
+  }
+
+  const data = await res.json();
+  const bbSessionId: string = data.id;
+
+  const { browser, context, page } = await connectToSession(bbSessionId);
+  const liveViewUrl = await fetchLiveViewUrl(bbSessionId);
+
+  return { sessionId: bbSessionId, page, browser, context, liveViewUrl };
+}
+```
+
+#### Reconnecting to an Existing Session
+
+For serverless environments, you can reconnect to an existing session by ID:
+
+```typescript
+import { getSession } from "./lib/ai-login/browser";
+
+const session = await getSession("bb_session_id_here");
+
+// Session state is preserved by BrowserBase
+await session.page.reload();
+```
+
+<Note>
+  BrowserBase keeps the actual browser alive server-side. Your Node.js process only holds a CDP connection to it, so you can disconnect and reconnect across multiple serverless function invocations.
+</Note>
+
+#### Closing a Session
+
+```typescript
+import { closeSession } from "./lib/ai-login/browser";
+
+await closeSession("bb_session_id_here");
+```
+
+## Working with analyzeLoginPage
+
+This is the core observation function. It screenshots the page, extracts stripped HTML, and sends both to Claude for classification.
+
+### Function Signature
+
+```typescript
+export async function analyzeLoginPage(
+  session: BrowserSession,
+): Promise<{ screen: LoginState; screenshot: string }>
+```
+
+### Return Value
+
+Returns a structured object conforming to `LoginStateSchema`:
+
+```typescript
+const { screen, screenshot } = await analyzeLoginPage(session);
+
+console.log(screen.type); // "credential_login_form" | "choice_screen" | ...
+
+if (screen.type === "credential_login_form") {
+  console.log("Inputs:", screen.inputs);
+  console.log("Submit:", screen.submit);
+}
+```
+
+### Self-Correcting Locators
+
+The function includes a validation loop. If any Playwright locator returned by the LLM doesn't match an element on the page, the error is fed back for retry:
+
+```typescript
+// From agent.ts:136-156
+const results = await Promise.all(
+  locators.map(async (loc) => ({
+    locator: loc,
+    exists: await validateLocator(session, loc),
+  })),
+);
+
+const missing = results.filter((r) => !r.exists);
+if (missing.length === 0) {
+  return { screen: object, screenshot };
+}
+
+const errorMsg = `Locators not found on page: ${missing.map((m) => m.locator).join(", ")}. Please generate alternative locators.`;
+console.warn(`[agent] Validation failed: ${errorMsg}`);
+errorHistory.push({ error: errorMsg });
+```
+
+This happens up to 3 times (defined by `MAX_ANALYSIS_RETRIES = 3`).
+
+## Working with handleScreen
+
+Once you have a classified screen, use `handleScreen` to act on it.
+
+### Function Signature
+
+```typescript
+export async function handleScreen(
+  session: BrowserSession,
+  screen: LoginState,
+  userInput?: Record<string, string>,
+): Promise<{ nextScreen: LoginState | null; message: AgentMessage }>
+```
+
+### Screen-Specific Behavior
+
+<Tabs>
+  <Tab title="credential_login_form">
+    Fills all input fields and clicks the submit button.
+    
+    ```typescript
+    const screen = {
+      type: "credential_login_form",
+      inputs: [
+        { name: "email", playwrightLocator: "input[name='email']" },
+        { name: "password", playwrightLocator: "input[type='password']" },
+      ],
+      submit: { playwrightLocator: "button[type='submit']" },
+    };
+    
+    const { message } = await handleScreen(session, screen, {
+      email: "user@example.com",
+      password: "secret",
+    });
+    
+    console.log(message); // { type: "action", action: "Filled form and submitted" }
+    ```
+    
+    Returns `nextScreen: null` — you must call `analyzeLoginPage` again after submission.
+  </Tab>
+  
+  <Tab title="choice_screen">
+    Clicks the selected option. If there's a separate submit button, clicks that too.
+    
+    ```typescript
+    const screen = {
+      type: "choice_screen",
+      options: [
+        { optionText: "Sign in with Google", optionPlaywrightLocator: "button#google" },
+        { optionText: "Sign in with Email", optionPlaywrightLocator: "button#email" },
+      ],
+    };
+    
+    const { message } = await handleScreen(session, screen, {
+      choice: "Sign in with Email",
+    });
+    ```
+  </Tab>
+  
+  <Tab title="magic_login_link">
+    Navigates the browser to the magic link URL.
+    
+    ```typescript
+    const screen = {
+      type: "magic_login_link",
+      instructionText: "Check your email for a verification link.",
+    };
+    
+    const { message } = await handleScreen(session, screen, {
+      url: "https://example.com/verify?token=abc123",
+    });
+    ```
+  </Tab>
+  
+  <Tab title="blocked_screen">
+    Auto-dismisses the blocking element and re-analyzes the page.
+    
+    ```typescript
+    const screen = {
+      type: "blocked_screen",
+      dismissPlaywrightLocator: "button#cookie-accept",
+    };
+    
+    const { nextScreen, message } = await handleScreen(session, screen);
+    console.log(nextScreen.type); // The screen behind the popup
+    ```
+    
+    Returns `nextScreen` directly—no need to re-analyze.
+  </Tab>
+  
+  <Tab title="loading_screen">
+    Waits for page content to load, then re-analyzes.
+    
+    ```typescript
+    const screen = { type: "loading_screen" };
+    
+    const { nextScreen } = await handleScreen(session, screen);
+    console.log(nextScreen.type); // The loaded screen
+    ```
+  </Tab>
+  
+  <Tab title="logged_in_screen">
+    Terminal state. Returns a success message.
+    
+    ```typescript
+    const screen = { type: "logged_in_screen" };
+    
+    const { message } = await handleScreen(session, screen);
+    console.log(message); // { type: "complete", success: true, message: "Successfully logged in!" }
+    ```
+  </Tab>
+</Tabs>
+
+## Credential Security
+
+<Warning>
+  Credentials are written directly to the browser DOM via Playwright. They never appear in logs or LLM context.
+</Warning>
+
+From `browser.ts:268-294`:
+
+```typescript
+export async function fillAndSubmit(
+  page: Page,
+  inputs: Array<{ locator: string; value: string }>,
+  submitLocator: string,
+): Promise<void> {
+  for (const { locator, value } of inputs) {
+    const filled = await fillInPageOrFrame(page, locator, value);
+    if (!filled) {
+      console.warn(`[browser] Could not find element for locator: ${locator}`);
+    }
+  }
+
+  await clickInPageOrFrame(page, submitLocator);
+
+  // Wait for navigation / redirects
+  await page.waitForLoadState("load").catch(() => {});
+  await page.waitForTimeout(3000);
+}
+```
+
+The `value` is passed directly to `element.fill(value)` and is never logged or sent to the LLM.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Customizing Prompts" icon="wand-magic-sparkles" href="/guides/customizing-prompts">
+    Learn how to modify the system prompt for custom use cases
+  </Card>
+  
+  <Card title="Troubleshooting" icon="wrench" href="/guides/troubleshooting">
+    Debug common issues with locators and classification
+  </Card>
+</CardGroup>

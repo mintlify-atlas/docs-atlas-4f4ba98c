@@ -1,0 +1,367 @@
+---
+title: Design Principles
+description: The three core principles that make Login Machine robust and reliable
+icon: compass
+---
+
+Login Machine is built on three design principles that make it robust enough to handle any login flow without per-website customization.
+
+From `src/lib/ai-login/agent.ts:8-11`:
+
+```typescript
+// Key design decisions:
+//   1. Observe, don't assume — every action is followed by a fresh analysis.
+//   2. Validate before acting — LLM locators are checked against the live DOM.
+//   3. Fail forward with context — errors are fed back for self-correction.
+```
+
+## 1. Observe, Don't Assume
+
+**Every action is followed by a fresh page analysis. The system never guesses what screen comes next.**
+
+Traditional automation tries to predict the flow:
+```python
+# Traditional approach (brittle)
+fill_email()
+click_continue()
+fill_password()  # Assumes password screen is next
+click_submit()   # Assumes submit button exists
+```
+
+This breaks when:
+- The site uses single-page forms instead of multi-step
+- MFA is enabled for some users but not others
+- The site shows an error message instead of advancing
+
+Login Machine doesn't make assumptions. After every action, it takes a fresh screenshot and re-analyzes:
+
+### Example: Form Submission
+
+From `src/lib/ai-login/agent.ts:215-226`:
+
+```typescript
+const inputs = screen.inputs
+  .filter((input) => userInput[input.name])
+  .map((input) => ({
+    locator: input.playwrightLocator,
+    value: userInput[input.name],
+  }));
+
+await fillAndSubmit(
+  session.page,
+  inputs,
+  screen.submit.playwrightLocator,
+);
+
+// Return null — route handler will analyze via SSE
+return {
+  nextScreen: null,
+  message: { type: "action", action: "Filled form and submitted" },
+};
+```
+
+Notice that after filling and submitting, the function returns `nextScreen: null`. It doesn't try to predict what comes next. Instead, the API route handler waits for the page to load and then calls `analyzeLoginPage()` again:
+
+From `src/app/api/chat/route.ts:159-173`:
+
+```typescript
+return sseResponse(async (send) => {
+  const { message } = await handleScreen(session, screen, values);
+
+  // 1. Signal that the action is done (form fill complete)
+  send("action_complete", {
+    action: message.type === "action" ? message.action : "Done",
+  });
+
+  // 2. Wait for page content to settle, then analyze
+  await waitForPageContent(session.page);
+  const { screen: analyzed, screenshot } =
+    await analyzeLoginPage(session);
+
+  send("screen", { screen: analyzed, screenshot });
+}, corsHeaders);
+```
+
+### Example: Auto-Retry Screens
+
+For `loading_screen` and `blocked_screen`, the agent handles them automatically but still re-analyzes afterward:
+
+From `src/lib/ai-login/agent.ts:291-304`:
+
+```typescript
+case "blocked_screen": {
+  if (!screen.dismissPlaywrightLocator) {
+    return {
+      nextScreen: null,
+      message: { type: "error", message: "No dismiss locator found" },
+    };
+  }
+  await clickElement(session.page, screen.dismissPlaywrightLocator);
+  const { screen: nextScreen } = await analyzeLoginPage(session);
+  return {
+    nextScreen,
+    message: { type: "action", action: "Dismissed blocking popup" },
+  };
+}
+```
+
+After dismissing the popup, the system doesn't assume it's back to the login form—it calls `analyzeLoginPage()` to verify.
+
+<Note>
+This principle is why Login Machine can handle any login flow. It doesn't matter if it's single-step, multi-step, or branching—the agent just keeps observing until it reaches `logged_in_screen`.
+</Note>
+
+## 2. Validate Before Acting
+
+**LLM outputs are checked against the live DOM. Hallucinated selectors are caught and corrected before they cause errors.**
+
+LLMs can hallucinate CSS selectors that look plausible but don't exist on the page. Login Machine validates every locator before using it.
+
+### Locator Extraction
+
+From `src/lib/ai-login/agent.ts:40-54`:
+
+```typescript
+/** Pull every Playwright locator string out of a classified screen. */
+function getScreenLocators(screen: LoginState): string[] {
+  const locators: string[] = [];
+  if (screen.inputs) {
+    for (const input of screen.inputs) locators.push(input.playwrightLocator);
+  }
+  if (screen.submit) locators.push(screen.submit.playwrightLocator);
+  if (screen.options) {
+    for (const opt of screen.options)
+      locators.push(opt.optionPlaywrightLocator);
+  }
+  if (screen.dismissPlaywrightLocator)
+    locators.push(screen.dismissPlaywrightLocator);
+  return locators;
+}
+```
+
+### Validation Against Live DOM
+
+From `src/lib/ai-login/agent.ts:56-78`:
+
+```typescript
+/** Check whether a Playwright locator resolves to at least one element. */
+async function validateLocator(
+  session: BrowserSession,
+  locator: string,
+): Promise<boolean> {
+  const page = session.page;
+
+  try {
+    if ((await page.locator(locator).first().count()) > 0) return true;
+  } catch {
+    // Fall through to iframes
+  }
+
+  for (const frame of page.frames()) {
+    if (frame === page.mainFrame()) continue;
+    try {
+      if ((await frame.locator(locator).first().count()) > 0) return true;
+    } catch {
+      // Next frame
+    }
+  }
+  return false;
+}
+```
+
+Note that validation checks **both the main frame and all iframes**. This is important for enterprise SSO flows that render login forms in iframes.
+
+### Validation in the Analysis Loop
+
+From `src/lib/ai-login/agent.ts:136-156`:
+
+```typescript
+// Screens without locators don't need validation
+if (["loading_screen", "logged_in_screen"].includes(object.type)) {
+  return { screen: object, screenshot };
+}
+
+// Validate every locator against the live DOM
+const locators = getScreenLocators(object);
+if (locators.length === 0) {
+  return { screen: object, screenshot };
+}
+
+const results = await Promise.all(
+  locators.map(async (loc) => ({
+    locator: loc,
+    exists: await validateLocator(session, loc),
+  })),
+);
+
+const missing = results.filter((r) => !r.exists);
+if (missing.length === 0) {
+  return { screen: object, screenshot };
+}
+
+const errorMsg = `Locators not found on page: ${missing.map((m) => m.locator).join(", ")}. Please generate alternative locators.`;
+console.warn(`[agent] Validation failed: ${errorMsg}`);
+errorHistory.push({ error: errorMsg });
+```
+
+If any locator doesn't resolve, the error is pushed to `errorHistory` and the loop retries.
+
+<Warning>
+Without validation, a hallucinated selector would cause Playwright to throw an error when trying to fill or click. This would crash the session. Validation catches the problem **before** touching the page.
+</Warning>
+
+## 3. Fail Forward with Context
+
+**When something goes wrong, the error becomes part of the next attempt's context. The LLM doesn't repeat the same mistake.**
+
+Instead of retrying blindly, Login Machine includes error history in the next LLM call so it can self-correct.
+
+### Error History Format
+
+From `src/lib/ai-login/agent.ts:98-104`:
+
+```typescript
+const errorHistory: Array<{ error: string }> = [];
+
+for (let attempt = 0; attempt < MAX_ANALYSIS_RETRIES; attempt++) {
+  const errorContext =
+    errorHistory.length > 0
+      ? `\n\n<error-history>\n${errorHistory.map((e, i) => `Attempt ${i + 1}: ${e.error}`).join("\n")}\n</error-history>`
+      : "";
+```
+
+The error context is appended to the prompt as XML tags:
+
+```xml
+<error-history>
+Attempt 1: Locators not found on page: button#submit-btn. Please generate alternative locators.
+</error-history>
+```
+
+### Retry with Context
+
+From `src/lib/ai-login/agent.ts:106-122`:
+
+```typescript
+const { output: object } = await generateText({
+  model: anthropic("claude-sonnet-4-5-20250929"),
+  output: Output.object({ schema: LoginStateSchema }),
+  system: LOGIN_SCREEN_SYSTEM_PROMPT,
+  messages: [
+    {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: `Current URL: ${url}\n\nHTML:\n${html}${errorContext}`,
+        },
+        { type: "image", image: `data:image/jpeg;base64,${screenshot}` },
+      ],
+    },
+  ],
+});
+```
+
+The LLM sees:
+1. The original page HTML and screenshot
+2. The error from the previous attempt
+3. A reminder to generate alternative locators
+
+This allows it to choose different selectors on the next try.
+
+### Example: Recovering from Bad Locators
+
+Imagine the LLM returns:
+```json
+{
+  "type": "credential_login_form",
+  "inputs": [
+    { "name": "email", "playwrightLocator": "input#email-field" }
+  ],
+  "submit": { "playwrightLocator": "button#submit-btn" }
+}
+```
+
+But `button#submit-btn` doesn't exist. Validation fails and adds to error history:
+
+```
+Attempt 1: Locators not found on page: button#submit-btn. Please generate alternative locators.
+```
+
+On the next attempt, the LLM sees this error and might try:
+```json
+{
+  "submit": { "playwrightLocator": "button[type='submit']" }
+}
+```
+
+This time it works, and the flow continues.
+
+### Maximum Retries
+
+From `src/lib/ai-login/agent.ts:34`:
+
+```typescript
+const MAX_ANALYSIS_RETRIES = 3;
+```
+
+If all 3 attempts fail, the system returns the last result as "best effort":
+
+From `src/lib/ai-login/agent.ts:158-176`:
+
+```typescript
+// Exhausted retries — return best effort
+console.warn("[agent] Exhausted retries, returning unvalidated result");
+const { output: object } = await generateText({
+  model: anthropic("claude-sonnet-4-5-20250929"),
+  output: Output.object({ schema: LoginStateSchema }),
+  system: LOGIN_SCREEN_SYSTEM_PROMPT,
+  messages: [
+    {
+      role: "user",
+      content: [
+        { type: "text", text: `Current URL: ${url}\n\nHTML:\n${html}` },
+        { type: "image", image: `data:image/jpeg;base64,${screenshot}` },
+      ],
+    },
+  ],
+});
+if (!object) throw new Error("LLM returned no structured output");
+return { screen: object, screenshot };
+```
+
+<Info>
+In practice, most pages resolve on the first attempt. The retry mechanism is insurance for edge cases like heavily customized login forms or dynamic selectors.
+</Info>
+
+## How the Principles Work Together
+
+These three principles form a system that's greater than the sum of its parts:
+
+<Steps>
+  <Step title="Observe, don't assume">
+    The agent takes a screenshot and analyzes the page without preconceptions.
+  </Step>
+  
+  <Step title="Validate before acting">
+    The LLM's output is checked against the live DOM. Bad locators are caught immediately.
+  </Step>
+  
+  <Step title="Fail forward with context">
+    If validation fails, the error is included in the next attempt so the LLM can correct itself.
+  </Step>
+  
+  <Step title="Act on validated output">
+    Only after validation passes does the agent interact with the page (fill, click, etc.).
+  </Step>
+  
+  <Step title="Repeat">
+    After the action completes, go back to step 1. No assumptions about what comes next.
+  </Step>
+</Steps>
+
+This loop runs until the agent sees `logged_in_screen`, at which point it returns success.
+
+<Tip>
+The combination of observation + validation + error context is what makes Login Machine work across different websites without customization. Each principle addresses a different failure mode of traditional browser automation.
+</Tip>

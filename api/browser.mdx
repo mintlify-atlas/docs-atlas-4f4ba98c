@@ -1,0 +1,431 @@
+---
+title: 'Browser'
+description: 'BrowserBase integration for remote browser automation'
+---
+
+The Browser module provides a stateless automation layer designed for serverless environments. Every request connects to BrowserBase via Chrome DevTools Protocol (CDP), performs its work, and closes the connection — while BrowserBase keeps the actual browser alive server-side.
+
+<Note>
+Credentials never pass through logs. Values are written directly to the DOM.
+</Note>
+
+---
+
+## BrowserSession
+
+The core interface representing a connection to a BrowserBase cloud browser.
+
+```typescript
+interface BrowserSession {
+  sessionId: string;
+  page: Page;
+  browser: Browser;
+  context: BrowserContext;
+  liveViewUrl: string;
+}
+```
+
+<ResponseField name="sessionId" type="string">
+  The BrowserBase session ID for reconnecting or debugging
+</ResponseField>
+
+<ResponseField name="page" type="Page">
+  Playwright Page instance connected to the remote browser
+</ResponseField>
+
+<ResponseField name="browser" type="Browser">
+  Playwright Browser instance (CDP connection)
+</ResponseField>
+
+<ResponseField name="context" type="BrowserContext">
+  The browser context containing the page
+</ResponseField>
+
+<ResponseField name="liveViewUrl" type="string">
+  Embeddable URL for live-viewing the browser session (fullscreen debugger)
+</ResponseField>
+
+---
+
+## Session Lifecycle
+
+### createSession
+
+Creates a new BrowserBase cloud browser session and connects via CDP.
+
+```typescript
+async function createSession(): Promise<BrowserSession>
+```
+
+**Environment Variables Required:**
+- `BROWSERBASE_API_KEY` — Your BrowserBase API key
+- `BROWSERBASE_PROJECT_ID` — Your BrowserBase project ID
+
+**Default Browser Settings:**
+- Viewport: 1280x800
+- Default timeout: 15 seconds
+
+#### Usage Example
+
+```typescript
+import { createSession } from '@/lib/ai-login/browser';
+
+const session = await createSession();
+console.log('Session ID:', session.sessionId);
+console.log('Live view:', session.liveViewUrl);
+
+await session.page.goto('https://example.com/login');
+```
+
+#### Error Handling
+
+```typescript
+try {
+  const session = await createSession();
+} catch (error) {
+  // Throws if BROWSERBASE_API_KEY or BROWSERBASE_PROJECT_ID are missing
+  // Throws if BrowserBase API returns non-200 status
+  console.error('Session creation failed:', error.message);
+}
+```
+
+---
+
+### getSession
+
+Reconnects to an existing BrowserBase session by ID.
+
+```typescript
+async function getSession(bbSessionId: string): Promise<BrowserSession>
+```
+
+<ParamField path="bbSessionId" type="string" required>
+  The BrowserBase session ID to reconnect to
+</ParamField>
+
+#### Usage Example
+
+```typescript
+import { getSession } from '@/lib/ai-login/browser';
+
+// Reconnect to a session created earlier
+const session = await getSession('bb_session_abc123');
+
+// Continue automation
+await session.page.click('button[type="submit"]');
+```
+
+<Note>
+This is useful for serverless environments where you need to reconnect to the same browser across multiple function invocations.
+</Note>
+
+---
+
+### closeSession
+
+Disconnects Playwright from the session. The browser remains alive on BrowserBase.
+
+```typescript
+async function closeSession(bbSessionId: string): Promise<void>
+```
+
+<ParamField path="bbSessionId" type="string" required>
+  The BrowserBase session ID to disconnect from
+</ParamField>
+
+#### Usage Example
+
+```typescript
+import { closeSession } from '@/lib/ai-login/browser';
+
+await closeSession('bb_session_abc123');
+// CDP connection closed, but browser remains alive on BrowserBase
+```
+
+<Warning>
+This only closes the CDP connection. To permanently terminate the browser, use the BrowserBase API to delete the session.
+</Warning>
+
+---
+
+## Page Context Extraction
+
+### getPageContext
+
+Builds minimal context for the LLM: stripped HTML and a JPEG screenshot.
+
+```typescript
+async function getPageContext(
+  page: Page,
+  attempt?: number
+): Promise<{ html: string; screenshot: string; url: string }>
+```
+
+<ParamField path="page" type="Page" required>
+  The Playwright page to extract context from
+</ParamField>
+
+<ParamField path="attempt" type="number" default="0">
+  Internal retry counter for handling navigation during extraction
+</ParamField>
+
+### Returns
+
+<ResponseField name="html" type="string">
+  Stripped HTML (max 100,000 characters) containing only attributes useful for locator generation:
+  - `id`, `class`, `type`, `name`, `placeholder`, `role`, `aria-label`
+  
+  Excludes:
+  - `<script>`, `<style>`, `<svg>`, `<img>`, `<noscript>`, `<link>` tags
+  - Elements with `display: none` or `visibility: hidden`
+</ResponseField>
+
+<ResponseField name="screenshot" type="string">
+  Base64-encoded JPEG (quality 80) of the viewport
+</ResponseField>
+
+<ResponseField name="url" type="string">
+  Current page URL
+</ResponseField>
+
+### Shadow DOM & iFrames
+
+The HTML extractor:
+- Traverses shadow DOM boundaries (for enterprise SSO widgets)
+- Extracts iframe content separately and wraps it in `<iframe-content>` tags
+- Handles `<slot>` elements in web components
+
+#### Usage Example
+
+```typescript
+import { getPageContext } from '@/lib/ai-login/browser';
+
+const session = await createSession();
+await session.page.goto('https://accounts.google.com');
+
+const { html, screenshot, url } = await getPageContext(session.page);
+
+console.log('URL:', url);
+console.log('HTML length:', html.length);
+console.log('Screenshot (base64):', screenshot.substring(0, 50) + '...');
+```
+
+#### Retry Logic
+
+If the execution context is destroyed during extraction (due to navigation), the function automatically retries up to 2 times with a 2-second delay.
+
+```typescript
+if (msg.includes("Execution context was destroyed") && attempt < 2) {
+  await page.waitForTimeout(2000);
+  return getPageContext(page, attempt + 1);
+}
+```
+
+---
+
+## Form Interaction
+
+### fillAndSubmit
+
+Fills multiple input fields and clicks the submit button. Searches across iframes if elements aren't found in the main frame.
+
+```typescript
+async function fillAndSubmit(
+  page: Page,
+  inputs: Array<{ locator: string; value: string }>,
+  submitLocator: string
+): Promise<void>
+```
+
+<ParamField path="page" type="Page" required>
+  The Playwright page to interact with
+</ParamField>
+
+<ParamField path="inputs" type="Array<{ locator: string; value: string }>" required>
+  Array of input fields with Playwright locators and values to fill
+</ParamField>
+
+<ParamField path="submitLocator" type="string" required>
+  Playwright locator for the submit button
+</ParamField>
+
+#### Usage Example
+
+```typescript
+import { fillAndSubmit } from '@/lib/ai-login/browser';
+
+await fillAndSubmit(
+  session.page,
+  [
+    { locator: 'input[name="email"]', value: 'user@example.com' },
+    { locator: 'input[type="password"]', value: 'secure123' }
+  ],
+  'button[type="submit"]'
+);
+
+// Waits for navigation and DOM content loaded
+```
+
+#### Behavior
+
+1. For each input:
+   - Waits for element to be attached (5s timeout)
+   - Focuses the element
+   - Clears existing value
+   - Fills with new value
+2. Clicks submit button
+3. Waits for load state (3s timeout)
+4. Waits for DOM content loaded (5s timeout)
+
+<Warning>
+Credential values are written directly to the DOM and never appear in logs or LLM context.
+</Warning>
+
+---
+
+### clickElement
+
+Clicks an element, searching across frames if needed.
+
+```typescript
+async function clickElement(page: Page, locator: string): Promise<void>
+```
+
+<ParamField path="page" type="Page" required>
+  The Playwright page to interact with
+</ParamField>
+
+<ParamField path="locator" type="string" required>
+  Playwright locator for the element to click
+</ParamField>
+
+#### Usage Example
+
+```typescript
+import { clickElement } from '@/lib/ai-login/browser';
+
+// Click a button
+await clickElement(session.page, 'button:has-text("Continue")');
+
+// Click a link
+await clickElement(session.page, 'a[href="/reset-password"]');
+```
+
+#### Behavior
+
+1. Tries to click in the main frame
+2. If not found, searches all iframes
+3. Waits for load state after click (1.5s timeout)
+
+---
+
+### waitForPageContent
+
+Waits for the SPA to render meaningful content. Used after form submissions.
+
+```typescript
+async function waitForPageContent(page: Page): Promise<void>
+```
+
+<ParamField path="page" type="Page" required>
+  The Playwright page to wait on
+</ParamField>
+
+#### Wait Conditions
+
+The page is considered "ready" when either:
+- At least 2 interactive elements exist (`input`, `button`, or `a[href]`)
+- Or body text length > 100 characters
+
+**Timeout:** 15 seconds (falls through silently)
+
+#### Usage Example
+
+```typescript
+import { waitForPageContent } from '@/lib/ai-login/browser';
+
+await session.page.click('button[type="submit"]');
+await waitForPageContent(session.page);
+
+// Page now has meaningful content
+const { screen } = await analyzeLoginPage(session);
+```
+
+<Note>
+Many login pages use client-side rendering where the initial HTML is just an empty shell. This function ensures we don't analyze before the real content appears.
+</Note>
+
+---
+
+## Setup Guide
+
+### 1. Get BrowserBase Credentials
+
+1. Sign up at [browserbase.com](https://browserbase.com)
+2. Create a project
+3. Copy your API key and project ID
+
+### 2. Set Environment Variables
+
+```bash
+export BROWSERBASE_API_KEY="your_api_key_here"
+export BROWSERBASE_PROJECT_ID="your_project_id_here"
+```
+
+Or in `.env.local`:
+
+```bash
+BROWSERBASE_API_KEY=your_api_key_here
+BROWSERBASE_PROJECT_ID=your_project_id_here
+```
+
+### 3. Initialize a Session
+
+```typescript
+import { createSession } from '@/lib/ai-login/browser';
+
+const session = await createSession();
+console.log('Live view:', session.liveViewUrl);
+
+await session.page.goto('https://example.com');
+```
+
+---
+
+## CDP Connection
+
+The module uses Playwright's `chromium.connectOverCDP()` to connect to BrowserBase:
+
+```typescript
+const wsEndpoint = `wss://connect.browserbase.com?apiKey=${apiKey}&sessionId=${bbSessionId}`;
+const browser = await chromium.connectOverCDP(wsEndpoint);
+const context = browser.contexts()[0];
+const page = context.pages()[0] || await context.newPage();
+```
+
+**Default timeout:** 15 seconds
+
+---
+
+## Frame-Aware Automation
+
+All interaction helpers (`fillAndSubmit`, `clickElement`) automatically search across iframes if elements aren't found in the main frame. This handles enterprise SSO flows that use embedded iframes.
+
+```typescript
+// Tries main frame first
+const el = page.locator(locator).first();
+if ((await el.count()) > 0) {
+  await el.click();
+  return true;
+}
+
+// Falls back to all iframes
+for (const frame of page.frames()) {
+  if (frame === page.mainFrame()) continue;
+  const el = frame.locator(locator).first();
+  if ((await el.count()) > 0) {
+    await el.click();
+    return true;
+  }
+}
+```

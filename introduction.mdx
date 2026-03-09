@@ -1,0 +1,101 @@
+---
+title: "Introduction"
+description: "AI-powered login automation that handles any website's authentication flow"
+---
+
+<img
+  className="block dark:hidden"
+  src="https://media.brand.dev/39135cd7-b1cf-49e8-9a1b-c16ae0e9549c.svg"
+  alt="Login Machine Logo"
+/>
+<img
+  className="hidden dark:block"
+  src="https://media.brand.dev/39135cd7-b1cf-49e8-9a1b-c16ae0e9549c.svg"
+  alt="Login Machine Logo"
+/>
+
+# Welcome to Login Machine
+
+**One browser agent loop that logs into any website.** Credentials never touch the model. They flow directly into the browser DOM.
+
+## Why Login Machine?
+
+If you're building browser agents that need to log into websites, you know the pain. Every website has a different login flow, and traditional automation means writing a dedicated script for each one. Hardcoded selectors, brittle state machines — everything breaks when a site ships a redesign.
+
+But login pages are designed for humans. Every screen is self-contained. You can always figure out what to do just by looking at it. An LLM with vision can do the same.
+
+At [Anon](https://anon.com), the Login Machine replaced hundreds of per-website scripts with a single agent loop that works for any login flow: multi-step credentials, SSO pickers, MFA prompts, magic links — all handled by the same code.
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="AI-Powered Classification" icon="brain" href="/concepts/how-it-works">
+    Claude Sonnet 4.5 analyzes screenshots and HTML to understand login pages
+  </Card>
+  <Card title="Universal Flow Handling" icon="arrows-split-up-and-left" href="/concepts/screen-types">
+    Handles credentials, SSO, MFA, magic links, and loading states automatically
+  </Card>
+  <Card title="Credential Isolation" icon="shield-halved" href="/concepts/credential-isolation">
+    LLM never sees user credentials — values flow directly to browser DOM
+  </Card>
+  <Card title="Self-Correcting Locators" icon="wand-magic-sparkles" href="/concepts/design-principles">
+    Validates Playwright locators against live DOM and retries with context
+  </Card>
+</CardGroup>
+
+## Quick Start
+
+Get up and running in minutes:
+
+<CardGroup cols={2}>
+  <Card title="Try the Demo" icon="play" href="https://login-machine.vercel.app/">
+    Experience Login Machine in action with our hosted demo
+  </Card>
+  <Card title="Run Locally" icon="laptop-code" href="/quickstart">
+    Set up your own instance with our quickstart guide
+  </Card>
+</CardGroup>
+
+## How It Works
+
+Login Machine uses a simple observation loop:
+
+1. **Navigate** to the login page
+2. **Take screenshot** and extract stripped HTML
+3. **LLM classifies** the screen type using Claude
+4. **Request input** from user (or auto-handle loading/blocked screens)
+5. **Submit input** in browser via Playwright
+6. **Repeat** until logged in
+
+<Card title="Learn More" icon="book" href="/concepts/how-it-works">
+  Deep dive into the architecture and design principles
+</Card>
+
+## Use Cases
+
+<CardGroup cols={3}>
+  <Card title="Browser Agents" icon="robot">
+    Power autonomous web agents that need to access authenticated content
+  </Card>
+  <Card title="Testing Automation" icon="vials">
+    Automate login flows in E2E tests without brittle selectors
+  </Card>
+  <Card title="User Onboarding" icon="user-plus">
+    Help users connect accounts across different services
+  </Card>
+</CardGroup>
+
+## Built With
+
+- **Frontend**: Next.js 16, React 19, Tailwind 4
+- **LLM**: Claude Sonnet 4.5 via [Vercel AI SDK](https://sdk.vercel.ai/)
+- **Browser**: Playwright over CDP via [BrowserBase](https://www.browserbase.com/)
+- **Validation**: Zod schemas + live DOM locator checks
+
+## Open Source
+
+Login Machine is MIT licensed and built by [@RichardHruby](https://github.com/RichardHruby) and [@jesse-olympus](https://github.com/jesse-olympus) at [Anon](https://anon.com).
+
+<Card title="View on GitHub" icon="github" href="https://github.com/RichardHruby/login-machine">
+  Star the repo and contribute to the project
+</Card>

@@ -1,0 +1,279 @@
+---
+title: "Environment Setup"
+description: "Complete guide to configuring API keys and environment variables"
+---
+
+Login Machine requires API keys for AI analysis and cloud browser automation. This guide walks through obtaining and configuring each credential.
+
+## Environment Variables Overview
+
+Login Machine uses three required environment variables and two optional ones:
+
+```bash .env.local
+# Required
+ANTHROPIC_API_KEY=sk-ant-...
+BROWSERBASE_API_KEY=...
+BROWSERBASE_PROJECT_ID=...
+
+# Optional (analytics)
+NEXT_PUBLIC_POSTHOG_KEY=
+NEXT_PUBLIC_POSTHOG_HOST=
+```
+
+<Info>
+  Create a `.env.local` file in the project root by copying `.env.example`:
+  
+  ```bash
+  cp .env.example .env.local
+  ```
+</Info>
+
+## Required Configuration
+
+### Anthropic API Key
+
+**Purpose**: Powers the AI classification engine using Claude Sonnet 4.5.
+
+The LLM analyzes page screenshots and stripped HTML to classify screen types and generate Playwright locators. Login Machine uses the Anthropic API via the Vercel AI SDK.
+
+<Steps>
+  <Step title="Create an Anthropic account">
+    Sign up at [console.anthropic.com](https://console.anthropic.com/) if you don't already have an account.
+  </Step>
+
+  <Step title="Generate an API key">
+    1. Navigate to **API Keys** in the console
+    2. Click **Create Key**
+    3. Name your key (e.g., "login-machine-dev")
+    4. Copy the generated key (starts with `sk-ant-`)
+
+    <Warning>
+      Store your API key securely. It cannot be viewed again after creation.
+    </Warning>
+  </Step>
+
+  <Step title="Add to environment file">
+    Paste the key into `.env.local`:
+
+    ```bash
+    ANTHROPIC_API_KEY=sk-ant-api03-...
+    ```
+  </Step>
+
+  <Step title="Add credits (if needed)">
+    New Anthropic accounts may require adding credits before API usage. Check your [billing settings](https://console.anthropic.com/settings/billing) and add a payment method if needed.
+  </Step>
+</Steps>
+
+**Pricing**: Claude Sonnet 4.5 costs approximately **$3 per million input tokens** and **$15 per million output tokens**. A typical login flow uses 5-15 requests with screenshots, totaling ~$0.10-0.50 per session.
+
+<Card title="Anthropic Pricing" icon="dollar-sign" href="https://www.anthropic.com/pricing">
+  View current pricing and model details
+</Card>
+
+### BrowserBase API Credentials
+
+**Purpose**: Provides cloud-hosted browsers with Playwright support.
+
+BrowserBase runs headless Chromium instances accessible via Chrome DevTools Protocol (CDP). This eliminates the need to install and manage local browser dependencies.
+
+<Steps>
+  <Step title="Sign up for BrowserBase">
+    Create an account at [browserbase.com](https://www.browserbase.com/).
+
+    <Note>
+      BrowserBase offers a free tier with 10 hours of browser time per month — sufficient for development and testing.
+    </Note>
+  </Step>
+
+  <Step title="Create a project">
+    1. Log into the [BrowserBase dashboard](https://www.browserbase.com/dashboard)
+    2. Click **New Project**
+    3. Name your project (e.g., "login-machine")
+    4. Copy the **Project ID** (format: `prj_...`)
+  </Step>
+
+  <Step title="Generate an API key">
+    1. Navigate to **Settings** → **API Keys**
+    2. Click **Create API Key**
+    3. Name your key and copy the generated value
+  </Step>
+
+  <Step title="Add credentials to environment file">
+    Add both values to `.env.local`:
+
+    ```bash
+    BROWSERBASE_API_KEY=bb_...
+    BROWSERBASE_PROJECT_ID=prj_...
+    ```
+  </Step>
+
+  <Step title="Verify connection">
+    Start the dev server and attempt a login flow. Check the BrowserBase dashboard to see active sessions.
+
+    You can view live browser sessions, debug logs, and session recordings in the dashboard.
+  </Step>
+</Steps>
+
+**Why BrowserBase?**
+
+| Benefit | Description |
+|---------|-------------|
+| **No local setup** | No need to install Chrome/Chromium or manage browser drivers |
+| **CDP access** | Full Playwright support over Chrome DevTools Protocol |
+| **Session recordings** | Debug failed logins by replaying browser sessions |
+| **Scalable** | Cloud infrastructure handles browser orchestration |
+
+<Card title="BrowserBase Documentation" icon="book" href="https://docs.browserbase.com/">
+  Learn more about BrowserBase features and API
+</Card>
+
+## Optional Configuration
+
+### PostHog Analytics
+
+**Purpose**: Tracks usage events and user behavior for product analytics.
+
+PostHog is **completely optional**. If you leave these variables blank, Login Machine will function normally without analytics.
+
+<Steps>
+  <Step title="Create a PostHog account">
+    Sign up at [posthog.com](https://posthog.com/) (free tier available).
+  </Step>
+
+  <Step title="Create a project">
+    1. Navigate to **Settings** → **Project**
+    2. Copy your **Project API Key**
+    3. Note your **Instance Host** (usually `https://app.posthog.com` or `https://eu.posthog.com`)
+  </Step>
+
+  <Step title="Add to environment file">
+    ```bash
+    NEXT_PUBLIC_POSTHOG_KEY=phc_...
+    NEXT_PUBLIC_POSTHOG_HOST=https://app.posthog.com
+    ```
+
+    <Info>
+      The `NEXT_PUBLIC_` prefix makes these variables accessible in the browser. PostHog events are captured client-side.
+    </Info>
+  </Step>
+</Steps>
+
+**What gets tracked**: Login session starts, screen classifications, user actions (form submissions, choice selections), and session completion status.
+
+## Environment File Template
+
+Here's the complete `.env.local` template with all variables:
+
+```bash .env.local
+# ===== Required =====
+
+# Anthropic API key for AI analysis
+# Get yours at: https://console.anthropic.com/
+ANTHROPIC_API_KEY=sk-ant-api03-...
+
+# BrowserBase credentials for cloud browser
+# Get yours at: https://www.browserbase.com/
+BROWSERBASE_API_KEY=bb_...
+BROWSERBASE_PROJECT_ID=prj_...
+
+# ===== Optional =====
+
+# PostHog analytics (leave blank to disable)
+# Get yours at: https://posthog.com/
+NEXT_PUBLIC_POSTHOG_KEY=
+NEXT_PUBLIC_POSTHOG_HOST=
+```
+
+## Security Best Practices
+
+<Warning>
+  **Never commit `.env.local` to version control.** The file is already in `.gitignore`, but double-check before pushing code.
+</Warning>
+
+Follow these guidelines to keep your credentials secure:
+
+1. **Use separate keys for development and production**  
+   Create distinct API keys for each environment to limit blast radius if a key is compromised.
+
+2. **Rotate keys regularly**  
+   Generate new API keys every few months, especially if keys have been shared or used in multiple places.
+
+3. **Restrict key permissions**  
+   Where possible, use scoped API keys with minimal required permissions.
+
+4. **Monitor usage**  
+   Check Anthropic and BrowserBase dashboards regularly for unexpected API usage.
+
+5. **Use secrets management in production**  
+   For deployed applications, use Vercel environment variables or a secrets manager (AWS Secrets Manager, HashiCorp Vault, etc.).
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Invalid Anthropic API key error">
+    **Symptoms**: `401 Unauthorized` or `Invalid API key` errors
+
+    **Solutions**:
+    - Verify the key starts with `sk-ant-`
+    - Check for extra spaces or newlines in `.env.local`
+    - Confirm the key hasn't been revoked in the Anthropic console
+    - Ensure you have available credits in your account
+  </Accordion>
+
+  <Accordion title="BrowserBase connection timeout">
+    **Symptoms**: Browser session fails to connect, timeout errors
+
+    **Solutions**:
+    - Verify both `BROWSERBASE_API_KEY` and `BROWSERBASE_PROJECT_ID` are set
+    - Check that the project ID matches an active project in your dashboard
+    - Ensure your BrowserBase account has available session hours
+    - Check BrowserBase status page for service issues
+  </Accordion>
+
+  <Accordion title="Environment variables not loading">
+    **Symptoms**: Variables are `undefined` at runtime
+
+    **Solutions**:
+    - Ensure the file is named `.env.local` (not `.env` or `env.local`)
+    - Restart the dev server after modifying environment variables
+    - Verify variables don't have quotes around values (use `KEY=value`, not `KEY="value"`)
+    - For client-side access, ensure variables start with `NEXT_PUBLIC_`
+  </Accordion>
+
+  <Accordion title="Rate limiting or quota errors">
+    **Symptoms**: `429 Too Many Requests` or quota exceeded messages
+
+    **Solutions**:
+    - **Anthropic**: Check your [billing settings](https://console.anthropic.com/settings/billing) and increase rate limits if needed
+    - **BrowserBase**: Upgrade your plan or wait for the monthly quota to reset
+    - Implement request throttling or caching in your application
+  </Accordion>
+</AccordionGroup>
+
+## Cost Estimation
+
+Here's what to expect for API costs during development:
+
+| Service | Free Tier | Development Usage | Estimated Monthly Cost |
+|---------|-----------|-------------------|------------------------|
+| **Anthropic** | $5 credit for new accounts | 50-100 login sessions/month | $5-25 |
+| **BrowserBase** | 10 hours/month | ~20-30 sessions (15 min avg) | $0 (within free tier) |
+| **PostHog** | 1 million events/month | Less than 10k events/month | $0 (within free tier) |
+
+<Info>
+  Production costs scale linearly with usage. A typical production deployment handling 1,000 logins/month costs approximately $50-100 in API fees.
+</Info>
+
+## Next Steps
+
+Once your environment is configured, you're ready to explore:
+
+<CardGroup cols={2}>
+  <Card title="Quickstart Guide" icon="rocket" href="/quickstart">
+    Run your first login flow
+  </Card>
+  <Card title="How It Works" icon="circle-info" href="/concepts/how-it-works">
+    Understand the agent architecture
+  </Card>
+</CardGroup>

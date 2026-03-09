@@ -1,0 +1,422 @@
+---
+title: Screen Types
+description: The six screen types that Login Machine can detect and handle
+icon: grid
+---
+
+Login Machine classifies every page into one of **six screen types**, each with a strict Zod schema that defines what data the LLM must return.
+
+## Overview
+
+| Type | What It Is | How It's Handled |
+|---|---|---|
+| `credential_login_form` | Email, password, OTP fields + submit button | Shows dynamic form → user fills → agent types into DOM |
+| `choice_screen` | Account picker, SSO options, workspace selector | Shows buttons → user picks → agent clicks |
+| `magic_login_link` | "Check your email" screens | Shows URL input → user pastes link → agent navigates |
+| `loading_screen` | Spinners, redirects, Cloudflare challenges | Auto-waits and re-analyzes (max 12 retries) |
+| `blocked_screen` | Cookie banners, popups blocking the flow | Auto-dismisses and re-analyzes |
+| `logged_in_screen` | Dashboard, homepage | Terminal success state |
+
+## Screen Type Enum
+
+From `src/lib/ai-login/types.ts:7-14`:
+
+```typescript
+export const ScreenType = z.enum([
+  "credential_login_form",
+  "choice_screen",
+  "magic_login_link",
+  "logged_in_screen",
+  "loading_screen",
+  "blocked_screen",
+]);
+```
+
+## credential_login_form
+
+Used when the page has input fields for credentials (email, password, text, tel, OTP, select) with a submit button.
+
+### Schema
+
+```typescript
+// From types.ts:67-90
+export const LoginStateSchema = z.object({
+  type: ScreenType,
+  inputs: z.array(InputElement).optional(),
+  submit: SubmitElement.optional(),
+  // ... other optional fields
+});
+
+// From types.ts:29-40
+export const InputElement = z.object({
+  type: InputType,
+  name: z.string().describe("Field name/identifier"),
+  label: z.string().nullable().describe("Visible label for the field"),
+  options: z.array(z.string()).optional().nullable().describe("Options for select fields"),
+  playwrightLocator: z.string().describe("Playwright locator for this element"),
+  errorMessage: z.string().optional().nullable(),
+});
+
+// From types.ts:20-27
+export const InputType = z.enum([
+  "text",
+  "email",
+  "password",
+  "tel",
+  "select",
+  "otp",
+]);
+
+// From types.ts:42-49
+export const SubmitElement = z.object({
+  type: z.enum(["submit", "button"]),
+  name: z.string(),
+  label: z.string().nullable(),
+  playwrightLocator: z.string().describe("Playwright locator for the submit button"),
+});
+```
+
+### Detection Criteria
+
+From the system prompt in `src/lib/ai-login/prompts.ts:7-12`:
+
+> Use when you see input fields for credentials (email, password, text, tel, OTP, select) with a submit button.
+> - Extract all visible input fields with their types and labels
+> - Identify the primary submit button
+> - Generate valid Playwright locators for each element
+> - **Error detection**: If the page shows an error message (e.g. "Your email or password is incorrect", "Invalid credentials", "Account not found"), set the errorMessage field on the most relevant input(s) with the exact error text.
+
+### How It's Handled
+
+From `src/lib/ai-login/agent.ts:200-227`:
+
+```typescript
+case "credential_login_form": {
+  const hasValues = userInput && Object.values(userInput).some((v) => v);
+  if (!hasValues || !screen.inputs || !screen.submit) {
+    return {
+      nextScreen: null,
+      message: { type: "input_request", screen },
+    };
+  }
+
+  const inputs = screen.inputs
+    .filter((input) => userInput[input.name])
+    .map((input) => ({
+      locator: input.playwrightLocator,
+      value: userInput[input.name],
+    }));
+
+  await fillAndSubmit(
+    session.page,
+    inputs,
+    screen.submit.playwrightLocator,
+  );
+
+  // Return null — route handler will analyze via SSE
+  return {
+    nextScreen: null,
+    message: { type: "action", action: "Filled form and submitted" },
+  };
+}
+```
+
+<Note>
+Credentials flow directly from the user to the browser DOM via the `fillAndSubmit` function. The LLM only provides the **locators**—it never sees the actual values. See [Credential Isolation](/concepts/credential-isolation) for details.
+</Note>
+
+### OTP Detection
+
+OTP inputs are detected using several heuristics. From the system prompt:
+
+> OTP inputs often have: maxlength=4-6, inputmode="numeric", pattern="[0-9]*", placeholder with "code"/"verification", autocomplete="one-time-code", or multiple single-digit inputs in sequence.
+
+## choice_screen
+
+Used when the page shows multiple buttons/links representing choices: account selector, company picker, MFA method selection, etc.
+
+### Schema
+
+```typescript
+// From types.ts:76-81
+name: z.string().optional().describe("Name of choice screen"),
+label: z.string().nullable().optional().describe("Label for choice screen"),
+options: z.array(ChoiceOption).optional().describe("Options for choice screen"),
+submit: SubmitElement.optional().describe(
+  "Submit button for credential forms, or for choice screens that require a separate confirm/continue button",
+),
+
+// From types.ts:51-56
+export const ChoiceOption = z.object({
+  optionText: z.string().describe("The text of this option"),
+  optionPlaywrightLocator: z.string().describe("Playwright locator for this option"),
+});
+```
+
+### Detection Criteria
+
+From the system prompt in `src/lib/ai-login/prompts.ts:14-18`:
+
+> Use when you see multiple buttons/links representing choices (account selector, company picker, MFA method selection).
+> - No credential input fields present
+> - Extract each option with its text and locator
+> - Most choice screens do NOT have a separate submit button — the options themselves are clickable. Only include the submit field if the page truly requires selecting an option (radio button, select box) AND then clicking a separate "Continue"/"Submit" button to confirm.
+
+### How It's Handled
+
+From `src/lib/ai-login/agent.ts:232-264`:
+
+```typescript
+case "choice_screen": {
+  if (!userInput?.choice || !screen.options) {
+    return {
+      nextScreen: null,
+      message: { type: "input_request", screen },
+    };
+  }
+
+  const option = screen.options.find(
+    (o) => o.optionText === userInput.choice,
+  );
+  if (!option) {
+    return {
+      nextScreen: screen,
+      message: {
+        type: "error",
+        message: `Option not found: ${userInput.choice}`,
+      },
+    };
+  }
+
+  await clickElement(session.page, option.optionPlaywrightLocator);
+
+  // If there's a separate submit button, click it after selecting
+  if (screen.submit) {
+    await clickElement(session.page, screen.submit.playwrightLocator);
+  }
+
+  // Return null — route handler will analyze via SSE
+  return {
+    nextScreen: null,
+    message: { type: "action", action: `Selected: ${userInput.choice}` },
+  };
+}
+```
+
+## magic_login_link
+
+Used when the page instructs the user to check their email for a verification/magic link.
+
+### Schema
+
+```typescript
+// From types.ts:82-85
+instructionText: z
+  .string()
+  .optional()
+  .describe("Instructions for magic link"),
+```
+
+### Detection Criteria
+
+From the system prompt in `src/lib/ai-login/prompts.ts:20-23`:
+
+> Use when the page instructs user to check their email for a verification/magic link.
+> - No active input fields
+> - Common patterns: "Check your inbox", "We sent you an email"
+
+### How It's Handled
+
+From `src/lib/ai-login/agent.ts:270-285`:
+
+```typescript
+case "magic_login_link": {
+  if (!userInput?.url) {
+    return {
+      nextScreen: null,
+      message: { type: "input_request", screen },
+    };
+  }
+
+  await session.page.goto(userInput.url, { waitUntil: "domcontentloaded" });
+  await session.page.waitForLoadState("load").catch(() => {});
+
+  // Return null — route handler will analyze via SSE
+  return {
+    nextScreen: null,
+    message: { type: "action", action: "Navigated to magic link" },
+  };
+}
+```
+
+<Info>
+The user pastes the magic link URL from their email, and the agent navigates the browser to it. This handles passwordless login flows that send one-time links.
+</Info>
+
+## blocked_screen
+
+Used when a popup or dialog blocks the login flow and must be dismissed (e.g., cookie banners, newsletter popups).
+
+### Schema
+
+```typescript
+// From types.ts:86-89
+dismissPlaywrightLocator: z
+  .string()
+  .optional()
+  .describe("Locator to dismiss blocking element"),
+```
+
+### Detection Criteria
+
+From the system prompt in `src/lib/ai-login/prompts.ts:25-27`:
+
+> Use when a popup/dialog blocks the login flow and must be dismissed.
+> - Extract the dismiss button locator
+
+### How It's Handled
+
+From `src/lib/ai-login/agent.ts:291-304`:
+
+```typescript
+case "blocked_screen": {
+  if (!screen.dismissPlaywrightLocator) {
+    return {
+      nextScreen: null,
+      message: { type: "error", message: "No dismiss locator found" },
+    };
+  }
+  await clickElement(session.page, screen.dismissPlaywrightLocator);
+  const { screen: nextScreen } = await analyzeLoginPage(session);
+  return {
+    nextScreen,
+    message: { type: "action", action: "Dismissed blocking popup" },
+  };
+}
+```
+
+<Note>
+This is an **auto-handled screen**—the agent dismisses the popup and immediately re-analyzes the page without waiting for user input.
+</Note>
+
+## loading_screen
+
+Used when the page is still loading: spinners, redirects, blank pages, Cloudflare challenges, etc.
+
+### Schema
+
+No additional fields required—just the `type`.
+
+### Detection Criteria
+
+From the system prompt in `src/lib/ai-login/prompts.ts:29-30`:
+
+> Use when the page is still loading (spinner, blank, empty body).
+
+### How It's Handled
+
+From `src/lib/ai-login/agent.ts:309-316`:
+
+```typescript
+case "loading_screen": {
+  await waitForPageContent(session.page);
+  const { screen: nextScreen } = await analyzeLoginPage(session);
+  return {
+    nextScreen,
+    message: { type: "thought", content: "Page was loading, waiting..." },
+  };
+}
+```
+
+The `waitForPageContent` function waits for the page to render meaningful content:
+
+From `src/lib/ai-login/browser.ts:241-261`:
+
+```typescript
+export async function waitForPageContent(page: Page): Promise<void> {
+  await page.waitForLoadState("load").catch(() => {});
+
+  try {
+    await page.waitForFunction(
+      () => {
+        const body = document.body;
+        if (!body) return false;
+        return (
+          body.querySelectorAll("input, button, a[href]").length >= 2 ||
+          (body.innerText || "").trim().length > 100
+        );
+      },
+      { timeout: 15000 },
+    );
+  } catch {
+    // Timeout is fine — re-analyze with whatever we have
+  }
+
+  await page.waitForTimeout(2000);
+}
+```
+
+<Tip>
+This screen type handles single-page apps that show a loading spinner while fetching data, as well as Cloudflare challenges that need time to complete.
+</Tip>
+
+## logged_in_screen
+
+The terminal success state. Used when the user has successfully completed authentication.
+
+### Schema
+
+No additional fields required—just the `type`.
+
+### Detection Criteria
+
+From the system prompt in `src/lib/ai-login/prompts.ts:32-35`:
+
+> Use when the user is successfully logged in (dashboard visible, profile dropdown, welcome message).
+> - NO login forms visible
+> - User has completed authentication
+
+### How It's Handled
+
+From `src/lib/ai-login/agent.ts:321-330`:
+
+```typescript
+case "logged_in_screen": {
+  return {
+    nextScreen: null,
+    message: {
+      type: "complete",
+      success: true,
+      message: "Successfully logged in!",
+    },
+  };
+}
+```
+
+<Info>
+This is the only screen type that returns `type: "complete"`—it signals to the frontend that the login flow is done and the browser session can be closed.
+</Info>
+
+## Locator Generation Rules
+
+For all screen types that include Playwright locators, the LLM follows a priority system. From the system prompt:
+
+> Priority for robust Playwright locators:
+> 1. Unique ID: `#uniqueId`
+> 2. Unique name with type: `input[name="username"][type="email"]`
+> 3. Button/link text: `button:has-text("Sign In")`
+> 4. Data attributes: `[data-testid="login-button"]`
+
+Every locator is validated against the live DOM before being used. See [How It Works](/concepts/how-it-works#validate-locators-against-live-dom) for details.
+
+## Exclusions
+
+The LLM is instructed to ignore certain elements. From the system prompt:
+
+> Exclude: hidden/disabled fields, cookie banners, social login buttons (Google/Apple/Microsoft), help/privacy/forgot-password links, sign-up links.
+
+These elements are excluded because:
+- **Hidden/disabled fields**: Can't be filled
+- **Cookie banners**: Handled by `blocked_screen`
+- **Social login buttons**: Out of scope (would require OAuth flows)
+- **Help/privacy/forgot-password/sign-up links**: Not part of the login flow

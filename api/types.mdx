@@ -1,0 +1,518 @@
+---
+title: 'Types'
+description: 'TypeScript types and Zod schemas for login state classification'
+---
+
+The Types module defines the core data structures for screen classification and agent communication. All schemas are built with Zod for runtime validation and type safety.
+
+---
+
+## Screen Types
+
+### ScreenType
+
+Enum of all possible login screen classifications.
+
+```typescript
+const ScreenType = z.enum([
+  "credential_login_form",
+  "choice_screen",
+  "magic_login_link",
+  "logged_in_screen",
+  "loading_screen",
+  "blocked_screen",
+]);
+```
+
+<Accordion title="credential_login_form">
+  A form requiring user credentials (email, password, OTP, etc.)
+  
+  **Required fields:**
+  - `inputs` — array of input fields
+  - `submit` — submit button
+  
+  **Example screens:**
+  - Email + password login
+  - Username + password
+  - OTP verification
+  - Multi-step forms (email first, then password)
+</Accordion>
+
+<Accordion title="choice_screen">
+  A screen presenting multiple options to choose from
+  
+  **Required fields:**
+  - `options` — array of choice options
+  - `submit` (optional) — separate confirm/continue button
+  
+  **Example screens:**
+  - "Sign in with email" vs "Sign in with phone"
+  - Account selection ("Which account?", "Choose a profile")
+  - Authentication method selection
+</Accordion>
+
+<Accordion title="magic_login_link">
+  A screen instructing the user to check email for a login link
+  
+  **Required fields:**
+  - `instructionText` — explanation for the user
+  
+  **Example screens:**
+  - "Check your email for a login link"
+  - "We sent you a verification link"
+</Accordion>
+
+<Accordion title="logged_in_screen">
+  The user has successfully logged in
+  
+  **Required fields:** None
+  
+  **Detection criteria:**
+  - Account/profile menu visible
+  - Dashboard or app content loaded
+  - URL changed to authenticated area
+</Accordion>
+
+<Accordion title="loading_screen">
+  The page is still loading or rendering
+  
+  **Required fields:** None
+  
+  **Detection criteria:**
+  - Loading spinner visible
+  - Minimal content on page
+  - SPA still hydrating
+</Accordion>
+
+<Accordion title="blocked_screen">
+  A blocking element is covering the login form
+  
+  **Required fields:**
+  - `dismissPlaywrightLocator` — locator for dismiss button
+  
+  **Example screens:**
+  - Cookie consent banner
+  - Newsletter popup
+  - Region selection overlay
+</Accordion>
+
+---
+
+## Element Schemas
+
+### InputElement
+
+Represents a form input field with its metadata and Playwright locator.
+
+```typescript
+const InputElement = z.object({
+  type: InputType,
+  name: z.string().describe("Field name/identifier"),
+  label: z.string().nullable().describe("Visible label for the field"),
+  options: z.array(z.string()).optional().nullable().describe("Options for select fields"),
+  playwrightLocator: z.string().describe("Playwright locator for this element"),
+  errorMessage: z.string().optional().nullable(),
+});
+```
+
+<ParamField path="type" type="InputType" required>
+  The input type: `text`, `email`, `password`, `tel`, `select`, or `otp`
+</ParamField>
+
+<ParamField path="name" type="string" required>
+  Field identifier (e.g., `"email"`, `"password"`, `"otp"`)
+</ParamField>
+
+<ParamField path="label" type="string | null" required>
+  Visible label text for the field (e.g., `"Email address"`)
+</ParamField>
+
+<ParamField path="options" type="string[] | null">
+  For `select` type inputs, the list of available options
+</ParamField>
+
+<ParamField path="playwrightLocator" type="string" required>
+  Playwright locator string (e.g., `'input[name="email"]'`)
+</ParamField>
+
+<ParamField path="errorMessage" type="string | null">
+  Any validation error currently displayed for this field
+</ParamField>
+
+#### Usage Example
+
+```typescript
+import type { InputElementType } from '@/lib/ai-login/types';
+
+const emailField: InputElementType = {
+  type: 'email',
+  name: 'email',
+  label: 'Email address',
+  playwrightLocator: 'input[name="email"]',
+  errorMessage: null,
+  options: null
+};
+
+const countrySelect: InputElementType = {
+  type: 'select',
+  name: 'country',
+  label: 'Select your country',
+  options: ['United States', 'Canada', 'United Kingdom'],
+  playwrightLocator: 'select[name="country"]',
+  errorMessage: null
+};
+```
+
+---
+
+### InputType
+
+Enum of supported input field types.
+
+```typescript
+const InputType = z.enum([
+  "text",
+  "email",
+  "password",
+  "tel",
+  "select",
+  "otp",
+]);
+```
+
+---
+
+### SubmitElement
+
+Represents a submit button or action button.
+
+```typescript
+const SubmitElement = z.object({
+  type: z.enum(["submit", "button"]),
+  name: z.string(),
+  label: z.string().nullable(),
+  playwrightLocator: z.string().describe("Playwright locator for the submit button"),
+});
+```
+
+<ParamField path="type" type="'submit' | 'button'" required>
+  The button type
+</ParamField>
+
+<ParamField path="name" type="string" required>
+  Internal identifier (e.g., `"submit"`, `"continue"`)
+</ParamField>
+
+<ParamField path="label" type="string | null" required>
+  Visible button text (e.g., `"Sign in"`, `"Continue"`)
+</ParamField>
+
+<ParamField path="playwrightLocator" type="string" required>
+  Playwright locator string (e.g., `'button[type="submit"]'`)
+</ParamField>
+
+#### Usage Example
+
+```typescript
+const submitButton = {
+  type: 'submit',
+  name: 'submit',
+  label: 'Sign in',
+  playwrightLocator: 'button[type="submit"]'
+};
+```
+
+---
+
+### ChoiceOption
+
+Represents a clickable option in a choice screen.
+
+```typescript
+const ChoiceOption = z.object({
+  optionText: z.string().describe("The text of this option"),
+  optionPlaywrightLocator: z.string().describe("Playwright locator for this option"),
+});
+```
+
+<ParamField path="optionText" type="string" required>
+  The visible text of the option (e.g., `"Use email instead"`)
+</ParamField>
+
+<ParamField path="optionPlaywrightLocator" type="string" required>
+  Playwright locator for clicking this option
+</ParamField>
+
+#### Usage Example
+
+```typescript
+import type { ChoiceOptionType } from '@/lib/ai-login/types';
+
+const emailOption: ChoiceOptionType = {
+  optionText: 'Use email instead',
+  optionPlaywrightLocator: 'button:has-text("Use email instead")'
+};
+
+const phoneOption: ChoiceOptionType = {
+  optionText: 'Use phone number',
+  optionPlaywrightLocator: 'button:has-text("Use phone number")'
+};
+```
+
+---
+
+## Login State Schema
+
+### LoginStateSchema
+
+The unified schema for all screen types. This is a flat union where fields are optional based on screen type.
+
+```typescript
+const LoginStateSchema = z.object({
+  type: ScreenType.describe("The type of screen detected"),
+  inputs: z.array(InputElement).optional().describe("Input fields for credential forms"),
+  submit: SubmitElement.optional().describe(
+    "Submit button for credential forms, or for choice screens that require a separate confirm/continue button"
+  ),
+  name: z.string().optional().describe("Name of choice screen"),
+  label: z.string().nullable().optional().describe("Label for choice screen"),
+  options: z.array(ChoiceOption).optional().describe("Options for choice screen"),
+  instructionText: z.string().optional().describe("Instructions for magic link"),
+  dismissPlaywrightLocator: z.string().optional().describe("Locator to dismiss blocking element"),
+});
+```
+
+<Note>
+This uses a flat union with optional fields (rather than `z.discriminatedUnion`) because it works more reliably with AI SDK's `generateObject` for LLM structured output.
+</Note>
+
+### Type Inference
+
+```typescript
+type LoginState = z.infer<typeof LoginStateSchema>;
+```
+
+### Field Usage by Screen Type
+
+| Field | credential_login_form | choice_screen | magic_login_link | logged_in_screen | loading_screen | blocked_screen |
+|-------|----------------------|---------------|------------------|------------------|----------------|----------------|
+| `type` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `inputs` | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `submit` | ✅ | Optional | ❌ | ❌ | ❌ | ❌ |
+| `name` | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `label` | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `options` | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `instructionText` | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| `dismissPlaywrightLocator` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+
+### Usage Examples
+
+<CodeGroup>
+```typescript credential_login_form
+import type { LoginState } from '@/lib/ai-login/types';
+
+const screen: LoginState = {
+  type: 'credential_login_form',
+  inputs: [
+    {
+      type: 'email',
+      name: 'email',
+      label: 'Email address',
+      playwrightLocator: 'input[name="email"]',
+      errorMessage: null,
+      options: null
+    },
+    {
+      type: 'password',
+      name: 'password',
+      label: 'Password',
+      playwrightLocator: 'input[type="password"]',
+      errorMessage: null,
+      options: null
+    }
+  ],
+  submit: {
+    type: 'submit',
+    name: 'submit',
+    label: 'Sign in',
+    playwrightLocator: 'button[type="submit"]'
+  }
+};
+```
+
+```typescript choice_screen
+const screen: LoginState = {
+  type: 'choice_screen',
+  name: 'login_method',
+  label: 'How would you like to sign in?',
+  options: [
+    {
+      optionText: 'Use email address',
+      optionPlaywrightLocator: 'button:has-text("Use email address")'
+    },
+    {
+      optionText: 'Use phone number',
+      optionPlaywrightLocator: 'button:has-text("Use phone number")'
+    }
+  ],
+  submit: {
+    type: 'button',
+    name: 'continue',
+    label: 'Continue',
+    playwrightLocator: 'button:has-text("Continue")'
+  }
+};
+```
+
+```typescript magic_login_link
+const screen: LoginState = {
+  type: 'magic_login_link',
+  instructionText: 'Check your email for a login link. Click the link to continue.'
+};
+```
+
+```typescript blocked_screen
+const screen: LoginState = {
+  type: 'blocked_screen',
+  dismissPlaywrightLocator: 'button[aria-label="Close"]'
+};
+```
+
+```typescript logged_in_screen
+const screen: LoginState = {
+  type: 'logged_in_screen'
+};
+```
+</CodeGroup>
+
+---
+
+## Agent Messages
+
+### AgentMessage
+
+Union type describing what happened during screen handling.
+
+```typescript
+type AgentMessage =
+  | { type: "thought"; content: string }
+  | { type: "action"; action: string }
+  | { type: "input_request"; screen: LoginState }
+  | { type: "complete"; success: boolean; message: string }
+  | { type: "error"; message: string };
+```
+
+<Accordion title="thought">
+  Internal reasoning or waiting state
+  
+  **Fields:**
+  - `content` — explanation of what the agent is doing
+  
+  **Example:**
+  ```typescript
+  { type: 'thought', content: 'Page was loading, waiting...' }
+  ```
+</Accordion>
+
+<Accordion title="action">
+  An action was performed successfully
+  
+  **Fields:**
+  - `action` — description of what was done
+  
+  **Example:**
+  ```typescript
+  { type: 'action', action: 'Filled form and submitted' }
+  { type: 'action', action: 'Selected: Use email instead' }
+  { type: 'action', action: 'Dismissed blocking popup' }
+  ```
+</Accordion>
+
+<Accordion title="input_request">
+  User input is required to proceed
+  
+  **Fields:**
+  - `screen` — the current screen requiring input
+  
+  **Example:**
+  ```typescript
+  { type: 'input_request', screen: { type: 'credential_login_form', ... } }
+  ```
+</Accordion>
+
+<Accordion title="complete">
+  Login flow has finished
+  
+  **Fields:**
+  - `success` — whether login succeeded
+  - `message` — human-readable result
+  
+  **Example:**
+  ```typescript
+  { type: 'complete', success: true, message: 'Successfully logged in!' }
+  ```
+</Accordion>
+
+<Accordion title="error">
+  An error occurred
+  
+  **Fields:**
+  - `message` — error description
+  
+  **Example:**
+  ```typescript
+  { type: 'error', message: 'Option not found: Use email instead' }
+  { type: 'error', message: 'No dismiss locator found' }
+  ```
+</Accordion>
+
+### Usage Example
+
+```typescript
+import { handleScreen } from '@/lib/ai-login/agent';
+import type { AgentMessage } from '@/lib/ai-login/types';
+
+const result = await handleScreen(session, screen, userInput);
+const message: AgentMessage = result.message;
+
+switch (message.type) {
+  case 'thought':
+    console.log('[Agent thinking]:', message.content);
+    break;
+  case 'action':
+    console.log('[Agent action]:', message.action);
+    break;
+  case 'input_request':
+    console.log('[Waiting for user input]');
+    // Prompt user for credentials
+    break;
+  case 'complete':
+    if (message.success) {
+      console.log('Success:', message.message);
+    } else {
+      console.log('Failed:', message.message);
+    }
+    break;
+  case 'error':
+    console.error('Error:', message.message);
+    break;
+}
+```
+
+---
+
+## Type Exports
+
+```typescript
+export const ScreenType = z.enum([...]);
+export const InputType = z.enum([...]);
+export const InputElement = z.object({...});
+export const SubmitElement = z.object({...});
+export const ChoiceOption = z.object({...});
+export const LoginStateSchema = z.object({...});
+
+export type LoginState = z.infer<typeof LoginStateSchema>;
+export type InputElementType = z.infer<typeof InputElement>;
+export type ChoiceOptionType = z.infer<typeof ChoiceOption>;
+export type AgentMessage = /* ... */;
+```
